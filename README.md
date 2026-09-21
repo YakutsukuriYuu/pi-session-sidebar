@@ -176,6 +176,7 @@ ln -s /path/to/pi-session-sidebar ~/.pi/agent/extensions/pi-session-sidebar
 /session-sidebar all         显示所有项目的会话（默认）
 /session-sidebar current     只显示当前项目的会话
 /session-sidebar refresh     手动刷新会话列表
+/session-sidebar debug       把诊断信息写入 ~/.pi/agent/pi-session-sidebar-debug.json
 /session-sidebar             无参数：打印当前生效的快捷键
 ```
 
@@ -263,6 +264,17 @@ keyboard protocol（Ghostty / kitty / WezTerm / iTerm2 新版支持）时才能�
 - 只拦**本插件自己的动作**：Enter 切换、`Ctrl+N` 新建、`/session-sidebar switch|new`
 - 被拒绝后侧栏保持焦点，等它跑完再按 Enter 即可；想强制切换就按 `Esc` 中断当前回答（pi 原生行为）
 - 关闭方式：配置里 `"guardBusySession": false`
+
+### 自愈式重绘
+
+侧栏平时只重画**内容发生变化的行**（这也是它不闪烁的原因）。代价是：如果有别的程序绕过
+pi 的渲染循环往侧栏那几列写过东西（其他插件的界面、远程窗格等），缓存会以为"这些行没变"，
+侧栏就会一直空在那里。
+
+所以插件每 **5 秒**强制整屏重绘一次侧栏：被覆盖的面板最多 5 秒自动恢复。开销是每 5 秒几 KB。
+
+**排查用**：`/session-sidebar debug` 会写出扫描根目录、每个根目录里的子项与命中文件数、
+列表长度、缓存状态、焦点与搜索状态、合成器状态与终端列数——"扫不到"还是"画不出来"一看便知。
 
 ### 性能
 

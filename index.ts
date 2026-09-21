@@ -1,5 +1,6 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { isKeyRepeat } from "@earendil-works/pi-tui";
@@ -50,12 +51,14 @@ const PULSE_INTERVAL_MS = 70;
 /** How long the "switching to …" hint stays if the switch never lands. */
 const PENDING_SWITCH_MS = 5000;
 
-/**
- * How long an `agent_start` that pi no longer reports as busy is still treated
+/** How long an `agent_start` that pi no longer reports as busy is still treated
  * as busy. Bounded on purpose: the guard must never be able to lock switching
  * out if the matching `agent_settled` is missed.
  */
 const BUSY_GRACE_MS = 2000;
+
+/** Interval of the forced full sidebar repaint (see startRepaintWatchdog). */
+const REPAINT_WATCHDOG_MS = 5000;
 
 export default function (pi: ExtensionAPI) {
   let config = loadConfig();
@@ -88,6 +91,8 @@ export default function (pi: ExtensionAPI) {
   /** Pulse animation state for the session we just switched to. */
   let pulseTimer: ReturnType<typeof setInterval> | null = null;
   let pulseStartedAt = 0;
+  /** Interval of the forced full repaint (see startRepaintWatchdog). */
+  let repaintTimer: ReturnType<typeof setInterval> | null = null;
   /** Set by agent_start; see isSessionBusy for how it is used. */
   let agentBusy = false;
   let agentBusyAt = 0;
@@ -171,6 +176,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function installCompositor(): void {
+    stopRepaintWatchdog();
     compositor?.dispose();
     compositor = null;
     if (!config.enabled || !tuiRef) return;
@@ -185,6 +191,31 @@ export default function (pi: ExtensionAPI) {
       }
     };
     compositor.install();
+    startRepaintWatchdog();
+  }
+
+  /**
+   * Rewrite every sidebar row on a slow timer.
+   *
+   * The compositor normally repaints only the rows whose content changed, which
+   * is what keeps it flicker-free — but it also means anything that wrote into
+   * the sidebar columns from outside pi's render loop (another extension, a
+   * remote pane) would leave the panel stuck until the next real change. A
+   * forced repaint every few seconds makes that self-healing, at the cost of a
+   * handful of kilobytes per tick.
+   */
+  function startRepaintWatchdog(): void {
+    stopRepaintWatchdog();
+    repaintTimer = setInterval(() => {
+      compositor?.paint(true);
+    }, REPAINT_WATCHDOG_MS);
+    repaintTimer.unref?.();
+  }
+
+  function stopRepaintWatchdog(): void {
+    if (!repaintTimer) return;
+    clearInterval(repaintTimer);
+    repaintTimer = null;
   }
 
   /**
@@ -849,6 +880,11 @@ export default function (pi: ExtensionAPI) {
           refreshSessions(true);
           ctx.ui.notify("会话列表已刷新", "info");
           break;
+        case "debug": {
+          const path = writeDebugReport(ctx);
+          ctx.ui.notify(`诊断信息已写入 ${path}（已列出会话 ${allSessions.length} 个）`, "info");
+          break;
+        }
         // --- Internal subcommands (used by focused-sidebar key handling) --------
         case "switch": {
           const id = rest[0];
@@ -908,6 +944,60 @@ export default function (pi: ExtensionAPI) {
       schedulePaint();
     },
   });
+
+  /**
+   * Write down everything the sidebar sees, for "the list is empty" reports.
+   *
+   * A screenshot cannot tell "found no files" apart from "did not paint"; this
+   * can: the roots, what is inside them, the cache state, focus and search
+   * state, and the compositor's view of the terminal.
+   */
+  function writeDebugReport(ctx: ExtensionContext): string {
+    const describeRoot = (root: string) => {
+      let children: string[] = [];
+      let counted = -1;
+      try {
+        children = readdirSync(root).slice(0, 12);
+      } catch {
+        children = [];
+      }
+      try {
+        counted = listSessions([root]).length;
+      } catch {
+        counted = -1;
+      }
+      return { path: root, exists: existsSync(root), children, counted };
+    };
+
+    const report = {
+      when: new Date().toISOString(),
+      agentDir: getAgentDir(),
+      sessionDir: ctx.sessionManager.getSessionDir(),
+      currentCwd,
+      currentSessionFile,
+      sessionRoots,
+      roots: sessionRoots.map(describeRoot),
+      listed: allSessions.length,
+      sample: allSessions.slice(0, 5).map((s) => `${s.modified.toISOString()}  ${s.title}`),
+      cache: sessionsCache
+        ? { entries: sessionsCache.entries.length, ageMs: Date.now() - sessionsCache.loadedAt }
+        : null,
+      focused,
+      searchQuery,
+      compositor: compositor
+        ? { active: compositor.isActive(), width: compositor.reservedWidth }
+        : null,
+      terminalColumns:
+        (tuiRef as { terminal?: { columns?: number } } | null)?.terminal?.columns ?? null,
+    };
+    const path = join(getAgentDir(), "pi-session-sidebar-debug.json");
+    try {
+      writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+    } catch {
+      // The notify still reports the path.
+    }
+    return path;
+  }
 
   // --- Shortcuts --------------------------------------------------------------------
   // The input listener handles these first (it also supports key ids pi cannot

@@ -1,4 +1,5 @@
 import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -18,6 +19,10 @@ import { join } from "node:path";
 const HEAD_BYTES = 16 * 1024;
 /** Bytes read from the end of a file (the latest name entry). */
 const TAIL_BYTES = 4 * 1024;
+/** How deep below a session root a session file may sit. */
+const MAX_SCAN_DEPTH = 3;
+/** Artifact trees that hold agent runs, not user sessions. */
+const SKIPPED_DIRECTORIES = new Set(["subagent-artifacts"]);
 
 export interface ListedSession {
   path: string;
@@ -167,6 +172,38 @@ function pruneCache(seen: Set<string>): void {
 }
 
 /**
+ * Every `*.jsonl` under `root`, bounded in depth.
+ *
+ * The documented layout is `<root>/<encoded-cwd>/<file>.jsonl`, but a plugin or
+ * a custom session dir can nest one level deeper, and a sidebar that suddenly
+ * finds nothing is worse than one that scans a little more. Subagent artifact
+ * trees (deep, and not user sessions) are skipped explicitly.
+ */
+function collectSessionFiles(root: string): string[] {
+  const files: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (depth >= MAX_SCAN_DEPTH) continue;
+        if (SKIPPED_DIRECTORIES.has(entry.name) || /^run-\d+$/.test(entry.name)) continue;
+        walk(path, depth + 1);
+      } else if (entry.name.endsWith(".jsonl")) {
+        files.push(path);
+      }
+    }
+  };
+  walk(root, 0);
+  return files;
+}
+
+/**
  * Scan session directories for `*.jsonl` files.
  *
  * Layout: `<root>/<encoded-cwd>/<timestamp>_<id>.jsonl`, so the header line
@@ -179,51 +216,34 @@ export function listSessions(roots: string[]): ListedSession[] {
 
   for (const root of roots) {
     if (!existsSync(root)) continue;
-    let dirs: string[];
-    try {
-      dirs = readdirSync(root, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name);
-    } catch {
-      continue;
-    }
-    for (const dir of dirs) {
-      const dirPath = join(root, dir);
-      let files: string[];
+    for (const path of collectSessionFiles(root)) {
+      if (seen.has(path)) continue;
+      let size = 0;
+      let mtimeMs = 0;
       try {
-        files = readdirSync(dirPath).filter((name) => name.endsWith(".jsonl"));
+        const stat = statSync(path);
+        size = stat.size;
+        mtimeMs = stat.mtimeMs;
       } catch {
         continue;
       }
-      for (const file of files) {
-        const path = join(dirPath, file);
-        if (seen.has(path)) continue;
-        let size = 0;
-        let mtimeMs = 0;
-        try {
-          const stat = statSync(path);
-          size = stat.size;
-          mtimeMs = stat.mtimeMs;
-        } catch {
-          continue;
-        }
-        seen.add(path);
-        const header = readHeader(path);
-        const title = titleFor(path, size, mtimeMs);
-        // A session without the header still needs a grouping key: the encoded
-        // directory name is the fallback (its dashes make it lossy, but it is
-        // stable and only used when the file does not carry a cwd).
-        const cwd = header.cwd ?? `/${dir.replace(/^-+|-+$/g, "").replace(/-/g, "/")}`;
-        sessions.push({
-          path,
-          id: header.id ?? file,
-          cwd,
-          name: title.name,
-          firstMessage: title.firstMessage,
-          modified: new Date(mtimeMs),
-          messageCount: 0,
-        });
-      }
+      seen.add(path);
+      const header = readHeader(path);
+      const title = titleFor(path, size, mtimeMs);
+      // A session without the header still needs a grouping key: the encoded
+      // project directory is the fallback (its dashes make it lossy, but it is
+      // stable and only used when the file does not carry a cwd).
+      const projectDir = path.slice(root.length + 1).split(/[/\\]/)[0] ?? "";
+      const cwd = header.cwd ?? `/${projectDir.replace(/^-+|-+$/g, "").replace(/-/g, "/")}`;
+      sessions.push({
+        path,
+        id: header.id ?? path.split(/[/\\]/).pop() ?? path,
+        cwd,
+        name: title.name,
+        firstMessage: title.firstMessage,
+        modified: new Date(mtimeMs),
+        messageCount: 0,
+      });
     }
   }
 

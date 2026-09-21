@@ -236,8 +236,13 @@ export class SessionSidebarCompositor {
   }
 
   /** Standalone repaint (state change outside a pi render cycle). */
-  paint(): void {
-    this.paintInternal(false, true);
+  /**
+   * Standalone repaint. `force` rewrites every row instead of only the changed
+   * ones — the escape hatch for anything that wrote over the sidebar columns
+   * without going through pi's render loop.
+   */
+  paint(force = false): void {
+    this.paintInternal(force, true);
   }
 
   /** True when the terminal is wide enough for the sidebar. */

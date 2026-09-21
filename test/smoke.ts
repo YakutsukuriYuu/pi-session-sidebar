@@ -710,6 +710,29 @@ assert.equal(titleCacheSize(), before, "cache size is stable for unchanged files
 rmSync(sessionFile);
 assert.equal(listSessions([tempRoot]).length, 0, "a deleted session disappears");
 assert.equal(titleCacheSize(), 0, "cache is pruned when the file is gone");
+
+// A layout nested one level deeper is still found (a plugin or a custom session
+// dir can produce one), while agent artifact trees are ignored.
+const nestedDir = join(tempRoot, "--tmp-nested--", "inner");
+mkdirSync(nestedDir, { recursive: true });
+writeFileSync(
+  join(nestedDir, "nested.jsonl"),
+  [
+    JSON.stringify({ ...header, id: "nested", cwd: "/tmp/nested" }),
+    JSON.stringify(userMessage),
+  ].join("\n") + "\n",
+);
+const artifactDir = join(tempRoot, "--tmp-artifacts--", "subagent-artifacts", "abc", "run-0");
+mkdirSync(artifactDir, { recursive: true });
+writeFileSync(join(artifactDir, "session.jsonl"), "{}\n");
+const deep = listSessions([tempRoot]);
+assert.equal(deep.length, 1, "exactly the real session is listed");
+assert.equal(deep[0].id, "nested", "a nested session file is found");
+assert.equal(deep[0].cwd, "/tmp/nested", "nested session keeps its header cwd");
+assert.ok(
+  !deep.some((s) => s.path.includes("subagent-artifacts")),
+  "agent artifact trees are skipped",
+);
 rmSync(tempRoot, { recursive: true, force: true });
 
 // --- landing pulse -----------------------------------------------------------
