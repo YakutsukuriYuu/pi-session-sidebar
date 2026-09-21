@@ -162,7 +162,6 @@ export default function (pi: ExtensionAPI) {
       "session-sidebar",
       "会话导航: ↑↓ 移动 · Enter 切换 · ←→ 折叠 · n 新建 · r 重命名 · / 搜索 · Esc 退出",
     );
-    currentCtx?.ui.notify("已进入会话导航（Esc 退出）", "info");
     schedulePaint();
   }
 
@@ -178,10 +177,24 @@ export default function (pi: ExtensionAPI) {
    * Inject a synthetic extension command into pi's input pipeline.
    * The command is dispatched with a fresh ExtensionCommandContext, which is
    * the only context that carries switchSession/newSession.
+   *
+   * NOTE: pi-tui drops `data` when `consume` is also true (consume returns
+   * early in the listener loop), so the transform must return ONLY `data`.
    */
-  function injectCommand(sub: string): { consume: boolean; data: string } {
+  function injectCommand(sub: string): { consume?: boolean; data?: string } {
+    // A non-empty editor draft would corrupt the injected command (the text
+    // would be appended to the draft), so refuse instead.
+    try {
+      const draft = currentCtx?.ui.getEditorText();
+      if (draft && draft.trim()) {
+        currentCtx?.ui.notify("输入框里有未发送的内容，请先处理后再操作会话", "warning");
+        return { consume: true };
+      }
+    } catch {
+      // getEditorText unavailable — proceed anyway.
+    }
     exitNavMode();
-    return { consume: true, data: `${CMD} ${sub}\r` };
+    return { data: `${CMD} ${sub}\r` };
   }
 
   function toggleGroupAtSelection(): void {
@@ -197,7 +210,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   // --- Raw keyboard input (nav mode) ---------------------------------------------
-  function handleInput(data: string): { consume: boolean; data?: string } | undefined {
+  function handleInput(data: string): { consume?: boolean; data?: string } | undefined {
     if (!navMode) return undefined;
 
     // Search input mode: capture printable characters.

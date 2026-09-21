@@ -79,15 +79,19 @@ export function renderSidebar(
   const lines: string[] = [];
 
   // Header
-  const headerTitle = state.focused ? " Pi 会话 ●" : " Pi 会话";
-  lines.push(`${accent(bold(headerTitle))}`);
+  if (state.focused) {
+    // Nav mode: prominent inverse badge instead of a toast notification.
+    lines.push(`${selected(bold(" 导航中 "))}${dim("  Pi 会话")}`);
+  } else {
+    lines.push(`${accent(bold(" Pi 会话"))}`);
+  }
   lines.push("");
 
   // Search line
   if (state.searchQuery !== null) {
     lines.push(` ${dim("/")} ${clip(state.searchQuery, inner - 4)}${ANSI.fgGray}▏${ANSI.reset}`);
   } else if (state.focused) {
-    lines.push(dim(" / 搜索  n 新建  Esc 退出"));
+    lines.push(dim(" Enter 切换 · Esc 退出"));
   } else {
     lines.push(dim(" Ctrl+Shift+H 导航"));
   }

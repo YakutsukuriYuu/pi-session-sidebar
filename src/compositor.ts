@@ -16,6 +16,7 @@ const SIDEBAR_BG = (() => {
 const BG_RESET = "\x1b[49m";
 const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
+const FG_CYAN = "\x1b[96m";
 
 function moveCursor(row: number, col: number): string {
   return `\x1b[${row};${col}H`;
@@ -70,6 +71,7 @@ export class SessionSidebarCompositor {
 
   private cachedLines: string[] | null = null;
   private cachedRows = 0;
+  private cachedFocused = false;
   private cacheValid = false;
   /** Called when the sidebar auto-hides because the terminal got too narrow. */
   onAutoHide: (() => void) | null = null;
@@ -245,13 +247,18 @@ export class SessionSidebarCompositor {
 
     const state = this.getState();
     const { lines } = renderSidebar(state, contentWidth, rawRows);
+    // Separator doubles as a mode indicator: accent color while navigating.
+    const separator = state.focused ? `${FG_CYAN}│${RESET}` : `${DIM}│${RESET}`;
 
     const formatted: string[] = [];
     for (let row = 1; row <= rawRows; row++) {
       formatted.push(this.formatLine(lines[row - 1], contentWidth));
     }
 
-    const dimensionsChanged = this.cachedRows !== rawRows || this.cachedLines === null;
+    const dimensionsChanged =
+      this.cachedRows !== rawRows ||
+      this.cachedLines === null ||
+      this.cachedFocused !== state.focused;
     const shouldPaintAll = forceFull || !this.cacheValid || dimensionsChanged;
     const rows = shouldPaintAll
       ? formatted.map((_, index) => index)
@@ -271,7 +278,7 @@ export class SessionSidebarCompositor {
       buf += moveCursor(row, 1);
       buf += formatted[index];
       buf += moveCursor(row, w);
-      buf += `${DIM}│${RESET}`;
+      buf += separator;
     }
 
     buf += "\x1b[?7h"; // enable auto-wrap
@@ -287,6 +294,7 @@ export class SessionSidebarCompositor {
 
     this.cachedLines = formatted;
     this.cachedRows = rawRows;
+    this.cachedFocused = state.focused;
     this.cacheValid = true;
   }
 
