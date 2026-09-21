@@ -25,6 +25,9 @@ export type SidebarAction =
   | { type: "expandAll" }
   | { type: "prevFolder" }
   | { type: "nextFolder" }
+  /** Directional focus switch between pi's editor and the sidebar. */
+  | { type: "focusSidebar" }
+  | { type: "focusEditor" }
   | { type: "backspace" }
   | { type: "clearSearch" }
   | { type: "type"; text: string }
@@ -142,6 +145,10 @@ export function decodeSidebarKey(data: string, keys: SidebarKeyConfig): SidebarA
   if (!repeat && matchesConfiguredKeys(data, keys.expandAll)) return { type: "expandAll" };
   if (!repeat && matchesConfiguredKeys(data, keys.prevFolder)) return { type: "prevFolder" };
   if (!repeat && matchesConfiguredKeys(data, keys.nextFolder)) return { type: "nextFolder" };
+
+  // Directional focus switch (ctrl+left / ctrl+right by default).
+  if (!repeat && matchesConfiguredKeys(data, keys.focusLeft)) return { type: "focusSidebar" };
+  if (!repeat && matchesConfiguredKeys(data, keys.focusRight)) return { type: "focusEditor" };
 
   if (matchesKey(data, "up")) return { type: "up" };
   if (matchesKey(data, "down")) return { type: "down" };

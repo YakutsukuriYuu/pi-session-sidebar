@@ -22,6 +22,9 @@ export interface SidebarKeyConfig {
   /** Jump to the previous / next project root. */
   prevFolder: string;
   nextFolder: string;
+  /** Directional focus switch: left reaches the sidebar, right returns to pi. */
+  focusLeft: string;
+  focusRight: string;
 }
 
 export interface SidebarConfig {
@@ -53,6 +56,12 @@ export const DEFAULT_KEYS: SidebarKeyConfig = {
   expandAll: "shift+right",
   prevFolder: "shift+up",
   nextFolder: "shift+down",
+  // Directional focus: the arrows point at the pane to move to, like pane
+  // switching in tmux. Ctrl+arrows are the *secondary* binding for the editor's
+  // word-wise cursor movement (alt+arrows come first on macOS, and alt+b/f are
+  // also available), so taking them costs very little.
+  focusLeft: "ctrl+left",
+  focusRight: "ctrl+right",
 };
 
 function configPath(): string {
@@ -109,6 +118,8 @@ function parseKeys(raw: Record<string, unknown>): SidebarKeyConfig {
     expandAll: keyOr(section.expandAll, DEFAULT_KEYS.expandAll),
     prevFolder: keyOr(section.prevFolder, DEFAULT_KEYS.prevFolder),
     nextFolder: keyOr(section.nextFolder, DEFAULT_KEYS.nextFolder),
+    focusLeft: keyOr(section.focusLeft, DEFAULT_KEYS.focusLeft),
+    focusRight: keyOr(section.focusRight, DEFAULT_KEYS.focusRight),
   };
 }
 

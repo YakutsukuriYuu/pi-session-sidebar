@@ -66,6 +66,7 @@ ChatGPT 风格的左侧会话导航栏，直接嵌入 [Pi](https://pi.dev) 的�
 
 - **左侧固定会话栏**：按项目分组显示所有 Pi 会话；文件夹用蓝色图标+蓝色标签，当前项目额外带 `▌` 竖条，当前会话用青色 `●`
 - **tmux 式焦点模型**：`Ctrl+H`（终端支持时）或 `Ctrl+Shift+H` 把键盘焦点交给侧栏，再按一次或 `Esc` 归还给 Pi
+- **方向性切换**：`Ctrl+←` 把焦点移到侧栏、`Ctrl+→` 移回 Pi（箭头指向要去的窗格）
 - **输入即搜索**：侧栏持有焦点时直接打字就是过滤（标题、首条消息、项目路径），底部实时显示匹配数
 - **切换会话**：`Enter` 切换并把焦点交还右侧；`Shift+Enter` 切换但**焦点留在侧栏**，
   可以连续浏览多个会话
@@ -110,11 +111,13 @@ pi -e /path/to/pi-session-sidebar/index.ts
 | `Ctrl+N` | 新建会话 |
 | `Ctrl+R` | 重命名当前会话 |
 | `Esc` 或聚焦键 | 焦点交还右侧 |
+| `Ctrl+→` | 焦点交还右侧（方向性切换） |
 
 ### 侧栏显示 / 隐藏与宽度（任意时刻可用，不要求聚焦）
 
 | 按键 | 作用 |
 | --- | --- |
+| `Ctrl+←` | 焦点**移到侧栏**（任意时刻可用，不要求已聚焦） |
 | `Ctrl+Shift+B` | 显示 / 隐藏侧栏面板 |
 | `Ctrl+Shift+=`（即 `Ctrl+Shift++`） | 侧栏变宽 1 列 |
 | `Ctrl+Shift+-` | 侧栏变窄 1 列 |
@@ -143,7 +146,9 @@ pi -e /path/to/pi-session-sidebar/index.ts
     "collapseAll": "shift+left",
     "expandAll": "shift+right",
     "prevFolder": "shift+up",
-    "nextFolder": "shift+down"
+    "nextFolder": "shift+down",
+    "focusLeft": "ctrl+left",
+    "focusRight": "ctrl+right"
   }
 }
 ```
@@ -161,6 +166,14 @@ pi -e /path/to/pi-session-sidebar/index.ts
 | `keys.expandAll` | 全部展开所有项目 |
 | `keys.prevFolder` | 跳到上一个项目 |
 | `keys.nextFolder` | 跳到下一个项目 |
+| `keys.focusLeft` | 焦点移到侧栏（默认 `Ctrl+←`） |
+| `keys.focusRight` | 焦点交还 Pi（默认 `Ctrl+→`） |
+
+**关于 `Ctrl+←` / `Ctrl+→` 的代价**：编辑器里"按词移动光标"原本有三个绑定
+（`alt+←/→`、`ctrl+←/→`、`alt+b/f`），方向性切换占用了其中 `ctrl+←/→` 这一组，
+所以**按词移动仍有 `Option+←/→`（macOS 惯例）和 `alt+b/f` 可用**。另外插件在检测到
+pi 自己的浮层（`/tree`、`/resume` 选择器、模型选择器等）打开时会自动让路，不会抢掉
+`/tree` 里的折叠键。
 
 **字段可以写多个键**（逗号分隔），这样新键更省力、旧键也不丢：
 

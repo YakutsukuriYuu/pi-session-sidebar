@@ -405,11 +405,27 @@ export default function (pi: ExtensionAPI) {
   }
 
   // --- Raw keyboard input ---------------------------------------------------------
+  /** True while pi (or one of our dialogs) has an overlay on screen. */
+  function hasOverlayOpen(): boolean {
+    const tui = tuiRef as { hasOverlay?: () => boolean } | null;
+    try {
+      return typeof tui?.hasOverlay === "function" && tui.hasOverlay();
+    } catch {
+      return false;
+    }
+  }
+
+  // --- Raw keyboard input ---------------------------------------------------------
   function handleInput(data: string): { consume?: boolean; data?: string } | undefined {
     // Key releases (and held-down repeats of the shortcut keys) are swallowed
     // regardless of focus. pi's editor does not filter kitty release events, so
     // forwarding them would let the shortcut dispatcher fire twice per press.
     if (isInertKeyEvent(data, config.keys)) return { consume: true };
+
+    // One of pi's own overlays (a picker, the model selector, /tree, or our own
+    // rename dialog) owns the keyboard while it is open: let it through. /tree
+    // binds ctrl+left itself, and a dialog's keystrokes must reach the dialog.
+    if (hasOverlayOpen()) return undefined;
 
     // The configured shortcuts work globally, focused or not. Auto-repeat is
     // swallowed instead of acted on, so holding a key cannot race ahead (the
@@ -420,6 +436,17 @@ export default function (pi: ExtensionAPI) {
         if (focused) exitFocus();
         else enterFocus();
       }
+      return { consume: true };
+    }
+
+    // Directional focus: ctrl+left reaches for the sidebar, ctrl+right hands the
+    // keyboard back to pi. Each is a no-op when focus is already there.
+    if (matchesConfiguredKeys(data, config.keys.focusLeft)) {
+      if (!repeat && !focused) enterFocus();
+      return { consume: true };
+    }
+    if (matchesConfiguredKeys(data, config.keys.focusRight)) {
+      if (!repeat && focused) exitFocus();
       return { consume: true };
     }
     if (matchesConfiguredKeys(data, config.keys.toggle)) {
@@ -472,6 +499,12 @@ export default function (pi: ExtensionAPI) {
         return { consume: true };
       case "nextFolder":
         jumpToFolder(1);
+        return { consume: true };
+      case "focusSidebar":
+        if (!focused) enterFocus();
+        return { consume: true };
+      case "focusEditor":
+        if (focused) exitFocus();
         return { consume: true };
 
       case "switch": {
