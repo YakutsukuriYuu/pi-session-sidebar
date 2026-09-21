@@ -8,6 +8,7 @@ import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src
 import type { SessionListEntry } from "../src/model.ts";
 import { renderSidebar, formatDate, clip, pulseMarkerFor, PULSE_FRAMES } from "../src/render.ts";
 import { listSessions, titleCacheSize } from "../src/sessions.ts";
+import { fallbackSessionRoot, resolveSessionRoots } from "../src/roots.ts";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -743,5 +744,71 @@ assert.equal(pulseMarkerFor(-1), undefined, "a negative age has no frame");
 for (const frame of PULSE_FRAMES) {
   assert.equal([...frame].length, 1, `pulse frame is single width: ${frame}`);
 }
+
+
+// --- session roots must not trust getAgentDir alone ---------------------------
+// The reported bug: with an SSH workspace active the agent dir pointed somewhere
+// without sessions, the scan came up empty and the sidebar said "no sessions"
+// while pi kept writing them to the usual place. The live session file is the
+// one input that cannot be wrong.
+const liveFile = "/home/u/.pi/agent/sessions/--proj--/2026_x.jsonl";
+const normalRoots = resolveSessionRoots({
+  agentDir: "/home/u/.pi/agent",
+  homeDir: "/home/u",
+  sessionDir: "/home/u/.pi/agent/sessions/--proj--",
+  sessionFile: liveFile,
+  showAllProjects: true,
+});
+assert.equal(normalRoots[0], "/home/u/.pi/agent/sessions", "the agent dir's root comes first");
+assert.equal(new Set(normalRoots).size, normalRoots.length, "roots are not duplicated");
+
+const movedRoots = resolveSessionRoots({
+  agentDir: "/remote/.pi/agent",
+  homeDir: "/home/u",
+  sessionDir: "/remote/.pi/agent/sessions/--proj--",
+  sessionFile: liveFile,
+  showAllProjects: true,
+});
+assert.ok(
+  movedRoots.includes("/home/u/.pi/agent/sessions"),
+  "the real sessions root is derived from the live session file",
+);
+assert.ok(
+  movedRoots.includes("/home/u/.pi/agent/sessions/--proj--"),
+  "the session's own project directory is scanned too",
+);
+
+const singleProjectRoots = resolveSessionRoots({
+  agentDir: "/remote/.pi/agent",
+  homeDir: "/home/u",
+  sessionDir: undefined,
+  sessionFile: liveFile,
+  showAllProjects: false,
+});
+assert.equal(
+  singleProjectRoots[0],
+  "/home/u/.pi/agent/sessions/--proj--",
+  "current-project mode starts at the session's own directory",
+);
+
+// The stock root is only a last resort: it must not be scanned up front, or an
+// intentionally isolated agent directory would list the user's real sessions.
+const isolated = resolveSessionRoots({
+  agentDir: "/tmp/isolated/agent",
+  homeDir: "/home/u",
+  sessionDir: "/tmp/isolated/agent/sessions/--proj--",
+  sessionFile: "/tmp/isolated/agent/sessions/--proj--/live.jsonl",
+  showAllProjects: true,
+});
+assert.ok(
+  !isolated.includes("/home/u/.pi/agent/sessions"),
+  "an isolated run does not pre-scan the stock root",
+);
+assert.equal(
+  fallbackSessionRoot("/home/u"),
+  "/home/u/.pi/agent/sessions",
+  "the stock root is available as the fallback",
+);
+assert.equal(isolated[0], "/tmp/isolated/agent/sessions", "the configured root leads");
 
 console.log("✓ all smoke tests passed");

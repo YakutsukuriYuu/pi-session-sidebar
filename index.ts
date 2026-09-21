@@ -1,6 +1,7 @@
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { isKeyRepeat } from "@earendil-works/pi-tui";
@@ -17,7 +18,9 @@ import {
 import { SessionSidebarCompositor } from "./src/compositor.ts";
 import { pulseMarkerFor } from "./src/render.ts";
 import { decodeSidebarKey, isInertKeyEvent, matchesConfiguredKeys, unusableConfiguredKeys } from "./src/keys.ts";
+import { fallbackSessionRoot, resolveSessionRoots } from "./src/roots.ts";
 import { listSessions } from "./src/sessions.ts";
+import type { ListedSession } from "./src/sessions.ts";
 import {
   filterSessions,
   flattenRows,
@@ -86,6 +89,8 @@ export default function (pi: ExtensionAPI) {
   let paintTimer: ReturnType<typeof setTimeout> | null = null;
   /** Directories to scan for session files (depends on showAllProjects). */
   let sessionRoots: string[] = [];
+  /** True when the last scan had to fall back to the stock sessions root. */
+  let fallbackUsed = false;
   /** Set while a switch is being handed to pi, so the wait has feedback. */
   let pendingSwitch: { title: string; at: number } | null = null;
   /** Pulse animation state for the session we just switched to. */
@@ -285,10 +290,31 @@ export default function (pi: ExtensionAPI) {
       afterListChanged();
     }
     try {
-      const listed = listSessions(sessionRoots).map((session) => ({
-        ...session,
-        title: session.name || session.firstMessage || "(空会话)",
-      }));
+      const withTitles = (sessions: ListedSession[]): SessionListEntry[] =>
+        sessions.map((session) => ({
+          ...session,
+          title: session.name || session.firstMessage || "(空会话)",
+        }));
+
+      let listed = withTitles(listSessions(sessionRoots));
+      fallbackUsed = false;
+      if (listed.length === 0) {
+        // The configured roots produced nothing. That can happen when the agent
+        // directory is not where pi actually keeps sessions (a plugin can move
+        // it), so try the stock location before believing "no sessions".
+        const fallback = fallbackSessionRoot(homedir());
+        if (!sessionRoots.includes(fallback)) {
+          const recovered = withTitles(listSessions([fallback]));
+          if (recovered.length > 0) {
+            listed = recovered;
+            fallbackUsed = true;
+            currentCtx?.ui.notify(
+              `扫描目录没有会话，已回退到 ${fallback}（找到 ${recovered.length} 个）`,
+              "info",
+            );
+          }
+        }
+      }
       sessionsCache = { entries: listed, loadedAt: Date.now() };
       allSessions = listed;
     } catch {
@@ -303,15 +329,15 @@ export default function (pi: ExtensionAPI) {
     schedulePaint();
   }
 
-  /** Session directories to scan: every project, or only the current one. */
+  /** Session directories to scan; see resolveSessionRoots for why it is not just the agent dir. */
   function sessionRootsFor(ctx: ExtensionContext): string[] {
-    const defaultRoot = join(getAgentDir(), "sessions");
-    const currentDir = ctx.sessionManager.getSessionDir();
-    if (!config.showAllProjects) return currentDir ? [currentDir] : [defaultRoot];
-    const roots = [defaultRoot];
-    // A custom --session-dir can live outside the default root.
-    if (currentDir && !currentDir.startsWith(defaultRoot)) roots.push(currentDir);
-    return roots;
+    return resolveSessionRoots({
+      agentDir: getAgentDir(),
+      homeDir: homedir(),
+      sessionDir: ctx.sessionManager.getSessionDir(),
+      sessionFile: ctx.sessionManager.getSessionFile(),
+      showAllProjects: config.showAllProjects,
+    });
   }
 
   /** Run the landing pulse on the current session's marker, then stop. */
@@ -977,6 +1003,7 @@ export default function (pi: ExtensionAPI) {
       currentSessionFile,
       sessionRoots,
       roots: sessionRoots.map(describeRoot),
+      fallbackUsed,
       listed: allSessions.length,
       sample: allSessions.slice(0, 5).map((s) => `${s.modified.toISOString()}  ${s.title}`),
       cache: sessionsCache
