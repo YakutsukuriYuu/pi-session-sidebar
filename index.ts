@@ -1,16 +1,14 @@
+import { existsSync, statSync, writeFileSync } from "node:fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  SessionInfo,
+} from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import {
-  clampWidth,
-  loadConfig,
-  saveConfig,
-  setPendingRefocus,
-  takePendingRefocus,
-  DEFAULT_FOCUS_KEY,
-} from "./src/config.ts";
-import { SessionSidebarCompositor } from "./src/compositor.ts";
-import { decodeSidebarKey, isInertKeyEvent } from "./src/keys.ts";
+import { SessionSidebarCompositor } from "./src/sidebar/compositor.ts";
+import { decodeSidebarKey, isInertKeyEvent } from "./src/sidebar/keys.ts";
 import {
   filterSessions,
   flattenRows,
@@ -18,7 +16,31 @@ import {
   type FlatRow,
   type SessionListEntry,
   type SidebarRenderState,
-} from "./src/model.ts";
+} from "./src/sidebar/model.ts";
+import {
+  clampWidth,
+  loadConfig,
+  readConfig,
+  saveConfig,
+  setPendingRefocus,
+  takePendingRefocus,
+  type MergedConfig,
+  type SidebarConfig,
+} from "./src/shared/config.ts";
+import { SessionSelectorComponent } from "./src/picker/session-selector.ts";
+import { launchInTerminal } from "./src/shared/terminal-launcher.ts";
+import { canonicalizePath, defaultSessionDir } from "./src/shared/paths.ts";
+import {
+  isSessionActive,
+  registerActiveSession,
+  unregisterActiveSession,
+} from "./src/shared/active-sessions.ts";
+import {
+  cleanupTrackedUnusedSessions,
+  deleteSessionFile,
+  trackUnusedSession,
+  untrackUnusedSession,
+} from "./src/shared/session-files.ts";
 
 /** Minimum terminal width for the sidebar; below this it auto-collapses. */
 const MIN_RAW_COLUMNS = 100;
@@ -26,10 +48,28 @@ const MIN_RAW_COLUMNS = 100;
 /** Our own command, used to reach a command context (see submitCommand). */
 const CMD = "/session-sidebar";
 
-export default function (pi: ExtensionAPI) {
-  let config = loadConfig();
+/** CLI flags that open the picker on startup, e.g. `pi --rr`. */
+const STARTUP_FLAGS = ["rr", "resume-plus"] as const;
 
-  // --- Mutable state -------------------------------------------------------
+/**
+ * pi's startup sequence installs its editor AFTER extensions get session_start
+ * and clears the editor container, which wipes any non-overlay custom UI opened
+ * that early. Overlays live outside the editor container and survive, so the
+ * startup-triggered picker must open as an overlay. Module state survives
+ * runtime rebinds (extension factories are cached), so one pending flag is
+ * enough and is always consumed by the dispatched /r handler.
+ */
+let startupOverlayPending = false;
+
+/** Whether unused sessions created by this extension are cleaned up (config). */
+let cleanupUnused = true;
+
+export default function (pi: ExtensionAPI) {
+  const loaded = loadConfig();
+  let config: SidebarConfig = loaded.config;
+  let mergedConfig: MergedConfig | null = null;
+
+  // --- Mutable sidebar state -------------------------------------------------
   let allSessions: SessionListEntry[] = [];
   let loading = false;
   /** Filter text; non-null means the search box is live (always live while focused). */
@@ -52,6 +92,13 @@ export default function (pi: ExtensionAPI) {
   let paintTimer: ReturnType<typeof setTimeout> | null = null;
   let refreshRunning = false;
   let refreshQueued = false;
+
+  /**
+   * Dialogs and overlays (rename input, delete confirm, the /r picker) take
+   * pi's keyboard focus. While one is open the sidebar must let keys through,
+   * otherwise a focused sidebar would swallow the dialog's keystrokes.
+   */
+  let overlayDepth = 0;
 
   // --- Derived state ---------------------------------------------------------
   function buildState(): SidebarRenderState {
@@ -187,7 +234,7 @@ export default function (pi: ExtensionAPI) {
     selectCurrentSession();
     currentCtx?.ui.setStatus(
       "session-sidebar",
-      "侧栏焦点 · 输入即搜索 · ↑↓ 选择 · Enter 切走 · ⇧Enter 留下 · ^N 新建 · ^R 重命名 · Esc 返回",
+      "侧栏焦点 · 输入搜索 · ↑↓ 选择 · Enter 切走 · ⇧Enter 留下 · ^O 新终端 · ^D 删除 · ^R 重命名 · Esc 返回",
     );
     requestPiRender();
     schedulePaint();
@@ -270,13 +317,110 @@ export default function (pi: ExtensionAPI) {
     toggleGroupCollapsed(cwd);
   }
 
-  // --- Raw keyboard input (focused sidebar only) ---------------------------------
+  // --- Direct async actions (no command context needed) --------------------------
+  /** Run a pi dialog while the sidebar holds focus: let keys reach the dialog. */
+  async function withOverlay<T>(fn: () => Promise<T>): Promise<T> {
+    overlayDepth++;
+    try {
+      return await fn();
+    } finally {
+      overlayDepth--;
+      schedulePaint();
+    }
+  }
+
+  async function renameSessionAction(session: SessionListEntry): Promise<void> {
+    const ctx = currentCtx;
+    if (!ctx) return;
+    await withOverlay(async () => {
+      const name = await ctx.ui.input("重命名会话", session.title);
+      const next = name?.trim();
+      if (!next) return;
+      try {
+        if (currentSessionFile && canonicalizePath(session.path) === canonicalizePath(currentSessionFile)) {
+          pi.setSessionName(next);
+        } else {
+          SessionManager.open(session.path).appendSessionInfo(next);
+        }
+        void refreshSessions();
+      } catch (error) {
+        ctx.ui.notify(`重命名失败：${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    });
+  }
+
+  async function deleteSessionAction(session: SessionListEntry): Promise<void> {
+    const ctx = currentCtx;
+    if (!ctx) return;
+    if (currentSessionFile && canonicalizePath(session.path) === canonicalizePath(currentSessionFile)) {
+      ctx.ui.notify("不能删除当前正在使用的会话", "warning");
+      return;
+    }
+    if (isSessionActive(session.path, currentSessionFile)) {
+      ctx.ui.notify("该会话正在其他窗口中使用，未删除", "warning");
+      return;
+    }
+    await withOverlay(async () => {
+      const ok = await ctx.ui.confirm("删除会话", `确定删除「${session.title}」？优先移入回收站。`);
+      if (!ok) return;
+      const result = deleteSessionFile(session.path);
+      if (!result.ok) {
+        ctx.ui.notify(`删除失败：${result.error ?? "未知错误"}`, "error");
+        return;
+      }
+      ctx.ui.notify(`已删除会话（${result.method === "trash" ? "回收站" : "直接删除"}）`, "info");
+      void refreshSessions();
+    });
+  }
+
+  async function openExternalAction(session: SessionListEntry): Promise<void> {
+    const ctx = currentCtx;
+    if (!ctx) return;
+    let cfg: MergedConfig;
+    try {
+      cfg = readConfig();
+    } catch (error) {
+      ctx.ui.notify(String(error instanceof Error ? error.message : error), "error");
+      return;
+    }
+    const shiftEnter = cfg.shiftEnter;
+    if (!shiftEnter.enabled) {
+      ctx.ui.notify("新终端打开已禁用（config.json: shiftEnter.enabled）", "warning");
+      return;
+    }
+    if (!existsSync(session.path)) {
+      ctx.ui.notify("目标 session 已不存在", "warning");
+      return;
+    }
+    await withOverlay(async () => {
+      try {
+        let mode = shiftEnter.mode;
+        if (mode === "same" && isSessionActive(session.path, currentSessionFile)) {
+          const ok = await ctx.ui.confirm(
+            "Session 已经打开",
+            "这个 session 正在使用。是否创建 fork 后在新终端打开？（否／取消不会打开）",
+          );
+          if (!ok) return;
+          mode = "fork";
+        }
+        await launchInTerminal(shiftEnter.terminal, session.cwd || currentCwd, session.path, mode, shiftEnter.piPath);
+        // Spawn acceptance isn't proof that the terminal's pi finished startup.
+        ctx.ui.notify(`已提交新终端启动请求（${mode === "fork" ? "独立副本" : "原会话"}）`, "info");
+      } catch (error) {
+        ctx.ui.notify(`无法启动新终端：${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    });
+  }
+
+  // --- Raw keyboard input --------------------------------------------------------
   function handleInput(data: string): { consume?: boolean; data?: string } | undefined {
     // Key releases (and held-down repeats of the focus shortcut) are swallowed
     // regardless of focus. pi's editor does not filter kitty release events, so
-    // forwarding them would let the shortcut dispatcher fire twice per press —
-    // focus on press, focus away on release.
+    // forwarding them would let the shortcut dispatcher fire twice per press.
     if (isInertKeyEvent(data, config.focusKey)) return { consume: true };
+
+    // A dialog/overlay owns the keyboard: let its keys through.
+    if (overlayDepth > 0) return undefined;
 
     // Not focused: pi owns the keyboard, this extension stays out of the way.
     if (!focused) return undefined;
@@ -302,15 +446,26 @@ export default function (pi: ExtensionAPI) {
 
       case "switch": {
         const target = currentRow();
-        if (!target?.session) return { consume: true };
-        if (target.session.path === currentSessionFile) {
+        if (!target) return { consume: true };
+        if (target.row.kind === "group") {
+          if (action.keepFocus) {
+            // Shift+Enter on a project row: create a fresh session inside it.
+            const group = buildState().groups[target.row.groupIndex];
+            if (group && group.cwd) {
+              return submitCommand(`new-in-folder ${encodeURIComponent(group.cwd)}`, "unfocus");
+            }
+            return { consume: true };
+          }
+          toggleGroupCollapsed(buildState().groups[target.row.groupIndex]?.cwd);
+          return { consume: true };
+        }
+        const session = target.session;
+        if (!session) return { consume: true };
+        if (session.path === currentSessionFile) {
           if (!action.keepFocus) exitFocus();
           return { consume: true };
         }
-        return submitCommand(
-          `switch ${target.session.id}`,
-          action.keepFocus ? "refocus" : "unfocus",
-        );
+        return submitCommand(`switch ${session.id}`, action.keepFocus ? "refocus" : "unfocus");
       }
 
       case "new":
@@ -319,8 +474,23 @@ export default function (pi: ExtensionAPI) {
       case "rename": {
         const target = currentRow();
         if (!target?.session) return { consume: true };
-        // Renaming does not replace the session, so focus simply stays here.
-        return submitCommand(`rename ${target.session.id}`, "stay");
+        // Renaming needs no command context; run the dialog directly.
+        void renameSessionAction(target.session);
+        return { consume: true };
+      }
+
+      case "delete": {
+        const target = currentRow();
+        if (!target?.session) return { consume: true };
+        void deleteSessionAction(target.session);
+        return { consume: true };
+      }
+
+      case "openExternal": {
+        const target = currentRow();
+        if (!target?.session) return { consume: true };
+        void openExternalAction(target.session);
+        return { consume: true };
       }
 
       case "backspace":
@@ -353,60 +523,333 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // --- /r picker (from pi-resume-plus) ---------------------------------------------
+  type Selection =
+    | { action: "resume" | "terminal"; path: string }
+    | { action: "new-in-folder"; folder: string }
+    | { action: "exit" }
+    | null;
+
+  /** Create a session in another project folder and switch to it. */
+  async function newSessionInFolder(ctx: ExtensionCommandContext, folder: string): Promise<void> {
+    if (!existsSync(folder) || !statSync(folder).isDirectory()) {
+      ctx.ui.notify(`目录不存在，无法新建会话：${folder}`, "error");
+      return;
+    }
+    try {
+      // Create the file in the directory pi would use for a new session in that
+      // folder: the per-project default, or the configured custom sessionDir if
+      // this process uses one. Using the *current* session's directory would store
+      // e.g. a pi-hub session inside the Qwen directory, and since pi then reports
+      // sessionDir != default(dir,cwd), the picker's All scope would degrade to
+      // that single directory.
+      const currentDir = ctx.sessionManager.getSessionDir();
+      const usesDefaultDirs = !currentDir || currentDir === defaultSessionDir(ctx.sessionManager.getCwd());
+      const targetDir = usesDefaultDirs ? defaultSessionDir(folder) : currentDir;
+      const created = SessionManager.create(folder, targetDir || undefined);
+      const file = created.getSessionFile();
+      const header = created.getHeader();
+      if (!file || !header) throw new Error("无法创建会话文件");
+      // pi defers writing a new session file until the first assistant message,
+      // and switching reads the target cwd from the file header. Without a file,
+      // open() would fall back to process.cwd() (the current directory). Persist
+      // the generated header, which makes it a valid session file for that cwd.
+      writeFileSync(file, `${JSON.stringify(header)}\n`, { flag: "wx" });
+      if (cleanupUnused) trackUnusedSession(file);
+      const result = await ctx.switchSession(file);
+      if (result?.cancelled) {
+        // The switch was vetoed, so this fresh session was never entered.
+        if (cleanupUnused) {
+          untrackUnusedSession(file);
+          try {
+            deleteSessionFile(file);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    } catch (error) {
+      ctx.ui.notify(`无法在 ${folder} 新建会话：${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+    // The replaced context is stale after a successful switch.
+  }
+
+  const openPicker = async (_args: string, ctx: ExtensionCommandContext) => {
+    if (ctx.mode !== "tui") {
+      ctx.ui.notify("会话选择器只能在交互式 TUI 中使用", "error");
+      return;
+    }
+    let cfg: MergedConfig;
+    try {
+      cfg = readConfig();
+    } catch (error) {
+      ctx.ui.notify(String(error instanceof Error ? error.message : error), "error");
+      return;
+    }
+    const shiftEnter = cfg.shiftEnter;
+    const searchMode = cfg.searchMode;
+    const folderNewSession = cfg.folderNewSession;
+    const cwd = ctx.sessionManager.getCwd();
+    const sessionDir = ctx.sessionManager.getSessionDir();
+    const currentFile = ctx.sessionManager.getSessionFile();
+    // Exact native usesDefaultSessionDir comparison, using a copied pure helper
+    // because that method is not part of ReadonlySessionManager's public API.
+    const usesDefault = sessionDir === defaultSessionDir(cwd);
+    const known = new Map<string, SessionInfo>();
+    const remember = (sessions: SessionInfo[]) => {
+      for (const session of sessions) known.set(session.path, session);
+      return sessions;
+    };
+    const overlay = startupOverlayPending;
+    startupOverlayPending = false;
+    // Closing an overlay restores focus to the target captured when it was shown.
+    // During pi's startup that target is undefined or the since-replaced editor
+    // instance, so nothing owns the keyboard afterwards. Re-installing the current
+    // editor (public API; its setEditorComponent path ends with setFocus(editor))
+    // hands focus back to the live editor. Only the startup/overlay path needs it.
+    const restoreEditorFocus = () => {
+      if (!overlay) return;
+      try {
+        const previous = ctx.ui.getEditorComponent();
+        ctx.ui.setEditorComponent(undefined);
+        if (previous) ctx.ui.setEditorComponent(previous);
+      } catch {
+        // best effort: never fail the command because of focus repair
+      }
+    };
+    let picker: SessionSelectorComponent | undefined;
+    let focusWatchdog: ReturnType<typeof setInterval> | undefined;
+    const selected = await withOverlay(async (): Promise<Selection> => {
+      try {
+        return await ctx.ui.custom<Selection>(
+          (tui, theme, keybindings, done) => {
+            picker = new SessionSelectorComponent(
+              async (progress) => remember(await SessionManager.list(cwd, sessionDir, progress)),
+              async (progress) =>
+                remember(
+                  await (usesDefault
+                    ? SessionManager.listAll(progress)
+                    : SessionManager.listAll(sessionDir, progress)),
+                ),
+              (path) => done({ action: "resume", path }),
+              () => done(null),
+              () => done({ action: "exit" }),
+              () => tui.requestRender(),
+              {
+                theme,
+                keybindings,
+                renameSession: async (path, name) => {
+                  const next = name?.trim();
+                  if (!next) return;
+                  if (currentFile && canonicalizePath(path) === canonicalizePath(currentFile))
+                    pi.setSessionName(next);
+                  else SessionManager.open(path).appendSessionInfo(next);
+                },
+                showRenameHint: true,
+                currentCwd: cwd,
+                searchMode,
+                newSessionInFolder: folderNewSession.enabled
+                  ? (folder: string) => done({ action: "new-in-folder", folder })
+                  : undefined,
+                onOpenInNew: shiftEnter.enabled ? (path) => done({ action: "terminal", path }) : undefined,
+              },
+              currentFile,
+            );
+            return picker;
+          },
+          overlay
+            ? {
+                overlay: true,
+                overlayOptions: { width: "100%", maxHeight: "90%" },
+                onHandle: (handle) => {
+                  // pi's startup continues after session_start and steals keyboard
+                  // focus (editor install clears the editor container). Overlays
+                  // survive the wipe but lose focus; reclaim it until it stays.
+                  handle.focus();
+                  let stable = 0;
+                  let ticks = 0;
+                  focusWatchdog = setInterval(() => {
+                    ticks++;
+                    if (picker?.focused) {
+                      stable++;
+                      if (stable >= 13) {
+                        // ~2s of uninterrupted focus: startup is done
+                        if (focusWatchdog) clearInterval(focusWatchdog);
+                        focusWatchdog = undefined;
+                      }
+                    } else {
+                      stable = 0;
+                      handle.focus();
+                    }
+                    if (ticks >= 70) {
+                      // ~10s hard cap; never outlives the picker
+                      if (focusWatchdog) clearInterval(focusWatchdog);
+                      focusWatchdog = undefined;
+                    }
+                  }, 150);
+                },
+              }
+            : undefined,
+        );
+      } finally {
+        if (focusWatchdog) clearInterval(focusWatchdog);
+      }
+    });
+    if (!selected) {
+      restoreEditorFocus();
+      return;
+    }
+    if (selected.action === "exit") {
+      ctx.shutdown();
+      return;
+    }
+    if (selected.action === "new-in-folder") {
+      await newSessionInFolder(ctx, selected.folder);
+      restoreEditorFocus();
+      return;
+    }
+    if (selected.action === "resume") {
+      // This is the native handleResumeSession path: trust, missing cwd prompt,
+      // extension veto, replacement lifecycle and error handling stay with pi.
+      await ctx.switchSession(selected.path);
+      return; // Old pi/ctx are stale after replacement.
+    }
+    if (!shiftEnter.enabled) return;
+    const target = known.get(selected.path);
+    if (!target || !existsSync(target.path)) {
+      ctx.ui.notify("目标 session 已不存在", "warning");
+      return;
+    }
+    try {
+      let mode = shiftEnter.mode;
+      if (mode === "same" && isSessionActive(target.path, currentFile)) {
+        if (
+          !(await ctx.ui.confirm(
+            "Session 已经打开",
+            "这个 session 正在使用。是否创建 fork 后在新终端打开？（否／取消不会打开）",
+          ))
+        )
+          return;
+        mode = "fork";
+      }
+      await launchInTerminal(shiftEnter.terminal, target.cwd || cwd, target.path, mode, shiftEnter.piPath);
+      // Spawn acceptance isn't proof that the terminal's pi finished startup.
+      ctx.ui.notify(`已提交新终端启动请求（${mode === "fork" ? "独立副本" : "原会话"}）`, "info");
+    } catch (error) {
+      ctx.ui.notify(`无法启动新终端：${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+    restoreEditorFocus(); // we stayed in this session, so typing must work again
+  };
+
   // --- Extension wiring ------------------------------------------------------------
-  pi.on("session_start", async (_event, ctx) => {
+  for (const name of STARTUP_FLAGS) {
+    pi.registerFlag(name, {
+      description: "启动后立即打开会话选择器（相当于启动时自动执行 /r）",
+      type: "boolean",
+    });
+  }
+
+  pi.on("session_start", async (event, ctx) => {
+    // resume-plus bookkeeping: active-session registry + unused-session cleanup.
+    try {
+      registerActiveSession(ctx.sessionManager.getSessionFile(), ctx.cwd);
+    } catch (error) {
+      ctx.ui.notify(`活跃登记失败：${String(error)}`, "warning");
+    }
+    try {
+      mergedConfig = readConfig();
+      cleanupUnused = mergedConfig.folderNewSession.cleanupUnused;
+    } catch {
+      // keep the previous value when the config is unreadable
+    }
+    if (cleanupUnused) {
+      try {
+        cleanupTrackedUnusedSessions(ctx.sessionManager.getSessionFile());
+      } catch {
+        // cleanup must never break session startup
+      }
+    }
+
     currentCtx = ctx;
     currentCwd = ctx.cwd;
     currentSessionFile = ctx.sessionManager.getSessionFile();
     focused = false;
     searchQuery = null;
 
-    if (!ctx.hasUI) return;
+    if (loaded.error) {
+      ctx.ui.notify(loaded.error, "error");
+      loaded.error = null;
+    }
 
-    unsubscribeInput?.();
-    unsubscribeInput = ctx.ui.onTerminalInput(handleInput);
+    if (ctx.hasUI) {
+      unsubscribeInput?.();
+      unsubscribeInput = ctx.ui.onTerminalInput(handleInput);
 
-    // The widget factory hands us the TUI instance the compositor needs.
-    // The widget itself renders nothing; the compositor paints the sidebar.
-    ctx.ui.setWidget(
-      "pi-session-sidebar",
-      (tui: unknown) => {
-        tuiRef = tui;
-        installCompositor();
-        // When the terminal shrinks below the minimum width the sidebar hides
-        // itself; leave focus so keys are never swallowed invisibly.
-        if (compositor) {
-          compositor.onAutoHide = () => {
-            if (focused) {
-              exitFocus();
-              currentCtx?.ui.notify("窗口过窄，侧栏焦点已释放", "info");
-            }
+      // The widget factory hands us the TUI instance the compositor needs.
+      // The widget itself renders nothing; the compositor paints the sidebar.
+      ctx.ui.setWidget(
+        "pi-session-sidebar",
+        (tui: unknown) => {
+          tuiRef = tui;
+          installCompositor();
+          // When the terminal shrinks below the minimum width the sidebar hides
+          // itself; leave focus so keys are never swallowed invisibly.
+          if (compositor) {
+            compositor.onAutoHide = () => {
+              if (focused) {
+                exitFocus();
+                currentCtx?.ui.notify("窗口过窄，侧栏焦点已释放", "info");
+              }
+            };
+          }
+          return {
+            dispose() {
+              compositor?.dispose();
+              compositor = null;
+              tuiRef = null;
+            },
+            invalidate() {},
+            render(): string[] {
+              return [];
+            },
           };
-        }
-        return {
-          dispose() {
-            compositor?.dispose();
-            compositor = null;
-            tuiRef = null;
-          },
-          invalidate() {},
-          render(): string[] {
-            return [];
-          },
-        };
-      },
-      { placement: "belowEditor" },
-    );
+        },
+        { placement: "belowEditor" },
+      );
 
-    // A "switch and stay" reloaded the extension; re-take focus.
-    const refocus = takePendingRefocus();
-    if (refocus) enterFocus();
+      // A "switch and stay" reloaded the extension; re-take focus.
+      if (takePendingRefocus()) enterFocus();
+    }
 
     await refreshSessions();
     if (focused) selectCurrentSession();
+
+    // --rr: open the picker right after startup, but only for a brand-new
+    // session (-c/-r already chose one, keep their priority).
+    if (event.reason !== "startup" || ctx.mode !== "tui") return;
+    if (!STARTUP_FLAGS.some((name) => pi.getFlag(name) === true)) return;
+    if (ctx.sessionManager.getEntries().some((entry) => entry.type === "message")) return;
+    // Event contexts cannot switch sessions; dispatch the command so the picker
+    // runs with a full command context (same code path as typing /r).
+    startupOverlayPending = true;
+    pi.sendUserMessage("/r", { expandPromptTemplates: true });
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
+    try {
+      unregisterActiveSession();
+    } catch {
+      // Must not block pi shutdown.
+    }
+    // On quit the session we are sitting in will never be used; reload keeps it.
+    if (event.reason === "quit" && cleanupUnused) {
+      try {
+        cleanupTrackedUnusedSessions();
+      } catch {
+        // never block shutdown
+      }
+    }
+
     unsubscribeInput?.();
     unsubscribeInput = null;
     compositor?.dispose();
@@ -507,18 +950,14 @@ export default function (pi: ExtensionAPI) {
         case "new":
           await ctx.newSession();
           break;
-        case "rename": {
-          const id = rest[0];
-          const session = allSessions.find((s) => s.id === id);
-          if (!session) break;
-          if (session.path !== currentSessionFile) {
-            ctx.ui.notify("只能重命名当前会话（请先切换到该会话）", "warning");
+        case "new-in-folder": {
+          const folder = decodeURIComponent(rest[0] ?? "");
+          if (!folder) {
+            setPendingRefocus(false);
+            ctx.ui.notify("缺少目标目录", "warning");
             break;
           }
-          const name = await ctx.ui.input("重命名会话", session.title);
-          if (name !== undefined && name.trim()) {
-            pi.setSessionName(name.trim());
-          }
+          await newSessionInFolder(ctx, folder);
           break;
         }
         default:
@@ -530,6 +969,9 @@ export default function (pi: ExtensionAPI) {
       schedulePaint();
     },
   });
+
+  pi.registerCommand("r", { description: "原生会话选择器＋项目目录树", handler: openPicker });
+  pi.registerCommand("resume-tree", { description: "原生会话选择器＋项目目录树", handler: openPicker });
 
   // --- Shortcut: hand focus to the sidebar (and back) -------------------------------
   pi.registerShortcut(config.focusKey as KeyId, {
@@ -545,6 +987,3 @@ export default function (pi: ExtensionAPI) {
     },
   });
 }
-
-/** Re-export for tests/tools that want the default focus key. */
-export { DEFAULT_FOCUS_KEY };

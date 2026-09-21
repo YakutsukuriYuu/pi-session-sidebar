@@ -4,11 +4,11 @@
  * (or run via tsx/ts-node)
  */
 import assert from "node:assert/strict";
-import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src/model.ts";
-import type { SessionListEntry } from "../src/model.ts";
-import { renderSidebar, formatDate, clip } from "../src/render.ts";
-import { clampWidth, setPendingRefocus, takePendingRefocus } from "../src/config.ts";
-import { decodeSidebarKey, isInertKeyEvent } from "../src/keys.ts";
+import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src/sidebar/model.ts";
+import type { SessionListEntry } from "../src/sidebar/model.ts";
+import { renderSidebar, formatDate, clip } from "../src/sidebar/render.ts";
+import { clampWidth, setPendingRefocus, takePendingRefocus } from "../src/shared/config.ts";
+import { decodeSidebarKey, isInertKeyEvent } from "../src/sidebar/keys.ts";
 
 function session(partial: Partial<SessionListEntry>): SessionListEntry {
   return {
@@ -97,7 +97,7 @@ assert.ok(clip("hello world, this is long", 8).length <= 8 + 10); // ANSI adds b
 
 // --- shiftRight transform (re-implemented here to test the regex logic) ----
 // We exercise the real compositor transform via a minimal fake terminal.
-const { SessionSidebarCompositor } = await import("../src/compositor.ts");
+const { SessionSidebarCompositor } = await import("../src/sidebar/compositor.ts");
 const written: string[] = [];
 const fakeTerminal = {
   columns: 120,
