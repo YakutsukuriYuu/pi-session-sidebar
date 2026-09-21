@@ -8,7 +8,7 @@ import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src
 import type { SessionListEntry } from "../src/model.ts";
 import { renderSidebar, formatDate, clip } from "../src/render.ts";
 import { clampWidth, setPendingRefocus, takePendingRefocus } from "../src/config.ts";
-import { decodeSidebarKey, isInertKeyEvent } from "../src/keys.ts";
+import { decodeSidebarKey, isInertKeyEvent, isNarrowerKey, isWiderKey } from "../src/keys.ts";
 
 function session(partial: Partial<SessionListEntry>): SessionListEntry {
   return {
@@ -286,6 +286,55 @@ for (const raw of ["\x03", "\x1b[9;5u", "\x1bZ", "\x1b[3~"]) {
   const action = decodeSidebarKey(raw, FOCUS_KEY);
   assert.ok(action.type === "ignore" || action.type === "type", `consumed: ${JSON.stringify(raw)}`);
 }
+
+// --- width shortcuts: Ctrl+Shift+= / Ctrl+Shift+- ----------------------------
+// The `=` key id covers terminals that report the base key code; the explicit
+// sequences cover terminals that report the produced character ('+' = 43),
+// which cannot be written as a key id since pi splits ids on "+".
+for (const [seq, label] of [
+  ["\x1b[61;6u", "kitty: '=' + ctrl+shift"],
+  ["\x1b[43;6u", "kitty: '+' + ctrl+shift"],
+  ["\x1b[27;6;61~", "modifyOtherKeys: '=' + ctrl+shift"],
+  ["\x1b[27;6;43~", "modifyOtherKeys: '+' + ctrl+shift"],
+] as const) {
+  assert.equal(keyCase(seq), "wider", `wider: ${label}`);
+  assert.equal(isWiderKey(seq), true, `isWiderKey: ${label}`);
+}
+for (const [seq, label] of [
+  ["\x1b[45;6u", "kitty: '-' + ctrl+shift"],
+  ["\x1b[95;6u", "kitty: '_' + ctrl+shift"],
+  ["\x1b[27;6;45~", "modifyOtherKeys: '-' + ctrl+shift"],
+  ["\x1b[27;6;95~", "modifyOtherKeys: '_' + ctrl+shift"],
+] as const) {
+  assert.equal(keyCase(seq), "narrower", `narrower: ${label}`);
+  assert.equal(isNarrowerKey(seq), true, `isNarrowerKey: ${label}`);
+}
+
+// pi binds Ctrl+- to undo and the width keys are shift-modified, so neither
+// bare variant may resize the sidebar.
+assert.equal(keyCase("\x1b[45;5u"), "ignore", "Ctrl+- (pi's undo) must not shrink");
+assert.equal(keyCase("\x1b[61;5u"), "ignore", "Ctrl+= must not grow");
+assert.equal(isWiderKey("\x1b[61;5u"), false, "unmodified Ctrl+= is not a width key");
+assert.equal(isNarrowerKey("\x1b[45;5u"), false, "unmodified Ctrl+- is not a width key");
+
+// Typing +/- must keep working in the search box while focused.
+assert.equal(keyCase("+"), "type", "'+' stays a search character");
+assert.equal(keyCase("-"), "type", "'-' stays a search character");
+assert.equal(keyCase("="), "type", "'=' stays a search character");
+assert.equal(isWiderKey("+"), false, "plain '+' is not the shortcut");
+assert.equal(isNarrowerKey("-"), false, "plain '-' is not the shortcut");
+
+// Held keys must not race past the intended width (release/repeat are inert).
+assert.equal(keyCase("\x1b[61;6:3u"), "ignore", "width key RELEASE is inert");
+assert.equal(keyCase("\x1b[61;6:2u"), "ignore", "width key REPEAT does not re-fire");
+
+// Boundaries: one column per press, clamped to the configured range.
+assert.equal(clampWidth(20), 20, "minimum width kept");
+assert.equal(clampWidth(20 - 1), 20, "shrinking past the minimum is clamped");
+assert.equal(clampWidth(60), 60, "maximum width kept");
+assert.equal(clampWidth(60 + 1), 60, "growing past the maximum is clamped");
+assert.equal(clampWidth(29 + 1), 30, "one step grows by exactly one column");
+assert.equal(clampWidth(29 - 1), 28, "one step shrinks by exactly one column");
 
 // --- focus marker round-trip ("switch but stay in the sidebar") ---------------
 setPendingRefocus(true);

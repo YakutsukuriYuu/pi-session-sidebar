@@ -15,6 +15,9 @@ export type SidebarAction =
   | { type: "switch"; keepFocus: boolean }
   | { type: "new" }
   | { type: "rename" }
+  /** Ctrl+Shift+= / Ctrl+Shift+-: sidebar width, one column per press. */
+  | { type: "wider" }
+  | { type: "narrower" }
   | { type: "backspace" }
   | { type: "clearSearch" }
   | { type: "type"; text: string }
@@ -58,6 +61,8 @@ export function decodeSidebarKey(data: string, focusKey: string): SidebarAction 
 
   if (!repeat && matchesKey(data, "ctrl+n")) return { type: "new" };
   if (!repeat && matchesKey(data, "ctrl+r")) return { type: "rename" };
+  if (!repeat && isWiderKey(data)) return { type: "wider" };
+  if (!repeat && isNarrowerKey(data)) return { type: "narrower" };
   if (!repeat && matchesKey(data, "ctrl+u")) return { type: "clearSearch" };
   if (matchesKey(data, "backspace")) return { type: "backspace" };
   if (!repeat && matchesKey(data, "tab")) return { type: "right" };
@@ -106,6 +111,38 @@ function printableText(data: string): string | null {
 function isFocusKey(data: string, focusKey: string): boolean {
   try {
     return matchesKey(data, focusKey as KeyId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Raw sequences for the width shortcuts.
+ *
+ * The `=` / `-` key ids cover terminals that report the *base* key code (kitty
+ * CSI-u sends `ESC[61;6u` for Shift+=), while the explicit sequences cover
+ * terminals that report the *produced character* (`+` is codepoint 43). The
+ * latter cannot be written as a key id at all: pi splits key ids on "+", so
+ * "ctrl+shift++" parses to garbage and never matches.
+ */
+const WIDER_SEQUENCES = ["\x1b[43;6u", "\x1b[27;6;43~", "\x1b[43;6~"];
+const NARROWER_SEQUENCES = ["\x1b[95;6u", "\x1b[27;6;95~", "\x1b[95;6~"];
+
+/** Ctrl+Shift+= (grow the sidebar). */
+export function isWiderKey(data: string): boolean {
+  if (WIDER_SEQUENCES.includes(data)) return true;
+  try {
+    return matchesKey(data, "ctrl+shift+=" as KeyId);
+  } catch {
+    return false;
+  }
+}
+
+/** Ctrl+Shift+- (shrink the sidebar). `_` is accepted for the shifted variant. */
+export function isNarrowerKey(data: string): boolean {
+  if (NARROWER_SEQUENCES.includes(data)) return true;
+  try {
+    return matchesKey(data, "ctrl+shift+-" as KeyId) || matchesKey(data, "ctrl+shift+_" as KeyId);
   } catch {
     return false;
   }

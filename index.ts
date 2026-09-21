@@ -1,6 +1,7 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
+import { isKeyRepeat } from "@earendil-works/pi-tui";
 import {
   clampWidth,
   loadConfig,
@@ -8,9 +9,16 @@ import {
   setPendingRefocus,
   takePendingRefocus,
   DEFAULT_FOCUS_KEY,
+  MAX_WIDTH,
+  MIN_WIDTH,
 } from "./src/config.ts";
 import { SessionSidebarCompositor } from "./src/compositor.ts";
-import { decodeSidebarKey, isInertKeyEvent } from "./src/keys.ts";
+import {
+  decodeSidebarKey,
+  isInertKeyEvent,
+  isNarrowerKey,
+  isWiderKey,
+} from "./src/keys.ts";
 import {
   filterSessions,
   flattenRows,
@@ -129,7 +137,39 @@ export default function (pi: ExtensionAPI) {
     compositor = null;
     if (!config.enabled || !tuiRef) return;
     compositor = new SessionSidebarCompositor(tuiRef, buildState, config.width, MIN_RAW_COLUMNS);
+    // When the terminal shrinks below the minimum width the sidebar hides
+    // itself; leave focus so keys are never swallowed invisibly. Wired here so
+    // a width change (which rebuilds the compositor) keeps the behaviour.
+    compositor.onAutoHide = () => {
+      if (focused) {
+        exitFocus();
+        currentCtx?.ui.notify("窗口过窄，侧栏焦点已释放", "info");
+      }
+    };
     compositor.install();
+  }
+
+  /**
+   * Grow/shrink the sidebar by one column, clamped to [MIN_WIDTH, MAX_WIDTH]
+   * and persisted so the width survives a restart.
+   */
+  function resizeSidebar(delta: number): void {
+    const next = clampWidth(config.width + delta);
+    if (next === config.width) {
+      currentCtx?.ui.notify(
+        delta > 0 ? `侧栏已是最大宽度（${MAX_WIDTH} 列）` : `侧栏已是最小宽度（${MIN_WIDTH} 列）`,
+        "info",
+      );
+      return;
+    }
+    config = { ...config, width: next };
+    saveConfig(config);
+    // The width is baked into the compositor's geometry (it narrows
+    // terminal.columns), so rebuild it and let pi redraw at the new width. The
+    // mouse-column correction follows the same value automatically.
+    installCompositor();
+    requestPiRender();
+    schedulePaint();
   }
 
   // --- Session list loading ----------------------------------------------------
@@ -187,7 +227,7 @@ export default function (pi: ExtensionAPI) {
     selectCurrentSession();
     currentCtx?.ui.setStatus(
       "session-sidebar",
-      "侧栏焦点 · 输入即搜索 · ↑↓ 选择 · Enter 切走 · ⇧Enter 留下 · ^N 新建 · ^R 重命名 · Esc 返回",
+      "侧栏焦点 · 输入即搜索 · ↑↓ 选择 · Enter 切走 · ⇧Enter 留下 · ^N 新建 · ^R 重命名 · ⇧^=/⇧^- 调宽 · Esc 返回",
     );
     requestPiRender();
     schedulePaint();
@@ -277,6 +317,16 @@ export default function (pi: ExtensionAPI) {
     // forwarding them would let the shortcut dispatcher fire twice per press —
     // focus on press, focus away on release.
     if (isInertKeyEvent(data, config.focusKey)) return { consume: true };
+
+    // Width shortcuts work globally, focused or not: Ctrl+Shift+= / Ctrl+Shift+-.
+    // Auto-repeat is swallowed instead of acted on, so holding the key does not
+    // race past the intended width.
+    const wider = isWiderKey(data);
+    const narrower = isNarrowerKey(data);
+    if (wider || narrower) {
+      if (!isKeyRepeat(data)) resizeSidebar(wider ? 1 : -1);
+      return { consume: true };
+    }
 
     // Not focused: pi owns the keyboard, this extension stays out of the way.
     if (!focused) return undefined;
@@ -373,16 +423,6 @@ export default function (pi: ExtensionAPI) {
       (tui: unknown) => {
         tuiRef = tui;
         installCompositor();
-        // When the terminal shrinks below the minimum width the sidebar hides
-        // itself; leave focus so keys are never swallowed invisibly.
-        if (compositor) {
-          compositor.onAutoHide = () => {
-            if (focused) {
-              exitFocus();
-              currentCtx?.ui.notify("窗口过窄，侧栏焦点已释放", "info");
-            }
-          };
-        }
         return {
           dispose() {
             compositor?.dispose();
