@@ -10,7 +10,7 @@ import {
   DEFAULT_FOCUS_KEY,
 } from "./src/config.ts";
 import { SessionSidebarCompositor } from "./src/compositor.ts";
-import { decodeSidebarKey } from "./src/keys.ts";
+import { decodeSidebarKey, isInertKeyEvent } from "./src/keys.ts";
 import {
   filterSessions,
   flattenRows,
@@ -272,6 +272,12 @@ export default function (pi: ExtensionAPI) {
 
   // --- Raw keyboard input (focused sidebar only) ---------------------------------
   function handleInput(data: string): { consume?: boolean; data?: string } | undefined {
+    // Key releases (and held-down repeats of the focus shortcut) are swallowed
+    // regardless of focus. pi's editor does not filter kitty release events, so
+    // forwarding them would let the shortcut dispatcher fire twice per press —
+    // focus on press, focus away on release.
+    if (isInertKeyEvent(data, config.focusKey)) return { consume: true };
+
     // Not focused: pi owns the keyboard, this extension stays out of the way.
     if (!focused) return undefined;
 

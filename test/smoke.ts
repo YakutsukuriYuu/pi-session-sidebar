@@ -8,7 +8,7 @@ import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src
 import type { SessionListEntry } from "../src/model.ts";
 import { renderSidebar, formatDate, clip } from "../src/render.ts";
 import { clampWidth, setPendingRefocus, takePendingRefocus } from "../src/config.ts";
-import { decodeSidebarKey } from "../src/keys.ts";
+import { decodeSidebarKey, isInertKeyEvent } from "../src/keys.ts";
 
 function session(partial: Partial<SessionListEntry>): SessionListEntry {
   return {
@@ -192,6 +192,25 @@ assert.equal(keyCase("\x0e"), "new", "Ctrl+N creates a session");
 assert.equal(keyCase("\x12"), "rename", "Ctrl+R renames");
 assert.equal(keyCase("\x15"), "clearSearch", "Ctrl+U clears the query");
 assert.equal(keyCase("\x7f"), "backspace", "backspace edits the query");
+
+// --- kitty press/repeat/release must not double-fire -------------------------
+// A release of the focus key must not unfocus (that would make a single press
+// focus and then instantly unfocus).
+assert.equal(keyCase("\x1b[104;6u"), "exit", "focus key press leaves focus while focused");
+assert.equal(keyCase("\x1b[104;6:3u"), "ignore", "focus key RELEASE is inert");
+assert.equal(keyCase("\x1b[13;2:3u"), "ignore", "Shift+Enter RELEASE is inert");
+assert.equal(keyCase("\x1b[13;1:3u"), "ignore", "Enter RELEASE is inert");
+assert.equal(keyCase("\x1b[104;6:2u"), "ignore", "held focus key does not toggle repeatedly");
+assert.equal(keyCase("\x1b[13;2:2u"), "ignore", "held Shift+Enter does not switch repeatedly");
+assert.equal(keyCase("\x1b[1;1:2A"), "up", "held arrow still navigates");
+
+// These inert events must be swallowed even while pi has focus, otherwise the
+// editor's shortcut dispatcher would act on the release.
+assert.equal(isInertKeyEvent("\x1b[104;6:3u", FOCUS_KEY), true, "release swallowed when unfocused");
+assert.equal(isInertKeyEvent("\x1b[104;6:2u", FOCUS_KEY), true, "focus-key repeat swallowed");
+assert.equal(isInertKeyEvent("\x1b[104;6u", FOCUS_KEY), false, "press reaches the dispatcher");
+assert.equal(isInertKeyEvent("a", FOCUS_KEY), false, "ordinary keys untouched");
+assert.equal(isInertKeyEvent("\x1b[1;1:2A", FOCUS_KEY), false, "arrow repeat untouched");
 assert.equal(keyCase("a"), "type", "plain letters feed the search box");
 assert.equal(keyCase("中"), "type", "wide characters feed the search box");
 assert.equal(keyCase("\x03"), "ignore", "Ctrl+C is swallowed while focused");
