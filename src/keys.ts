@@ -1,5 +1,6 @@
 import { decodeKittyPrintable, isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import type { KeyId } from "@earendil-works/pi-tui";
+import type { SidebarKeyConfig } from "./config.ts";
 
 /**
  * Semantic action decoded from a raw terminal key sequence while the sidebar
@@ -7,6 +8,7 @@ import type { KeyId } from "@earendil-works/pi-tui";
  */
 export type SidebarAction =
   | { type: "exit" }
+  | { type: "toggleSidebar" }
   | { type: "up" }
   | { type: "down" }
   | { type: "left" }
@@ -15,7 +17,7 @@ export type SidebarAction =
   | { type: "switch"; keepFocus: boolean }
   | { type: "new" }
   | { type: "rename" }
-  /** Ctrl+Shift+= / Ctrl+Shift+-: sidebar width, one column per press. */
+  /** Width shortcuts: one column per press. */
   | { type: "wider" }
   | { type: "narrower" }
   | { type: "backspace" }
@@ -25,17 +27,64 @@ export type SidebarAction =
   | { type: "ignore" };
 
 /**
+ * Sequences some terminals send for a shifted symbol key instead of the key id.
+ *
+ * kitty CSI-u reports the *base* key code, so Shift+= arrives as `ESC[61;6u` and
+ * a configured "ctrl+shift+=" matches it directly. Other terminals report the
+ * *produced character* instead: "+" is codepoint 43 and "_" is 95. Those cannot
+ * be written as key ids at all — pi splits key ids on "+", so "ctrl+shift++"
+ * parses to garbage and never matches — hence this explicit table.
+ */
+const KEY_SEQUENCE_VARIANTS: Record<string, readonly string[]> = {
+  "ctrl+shift+=": ["\x1b[43;6u", "\x1b[27;6;43~", "\x1b[43;6~"],
+  "ctrl+shift+-": ["\x1b[95;6u", "\x1b[27;6;95~", "\x1b[95;6~"],
+};
+
+/**
+ * Match raw input against a user-configured key id, including the terminal
+ * variants listed above.
+ */
+export function matchesConfiguredKey(data: string, keyId: string): boolean {
+  if (!data || !keyId) return false;
+  if (KEY_SEQUENCE_VARIANTS[keyId]?.includes(data)) return true;
+  try {
+    return matchesKey(data, keyId as KeyId);
+  } catch {
+    // An unparsable user-supplied key id must never crash the extension.
+    return false;
+  }
+}
+
+/**
+ * Events that must be swallowed no matter where focus is.
+ *
+ * Key releases carry no input content, but pi's editor does not filter them, so
+ * a release would otherwise be matched again by the shortcut dispatcher — one
+ * keypress would toggle twice. The same applies to auto-repeat of the sidebar
+ * shortcuts: holding the toggle key would flip the panel back and forth, and
+ * holding a width key would race past the intended column.
+ */
+export function isInertKeyEvent(data: string, keys: SidebarKeyConfig): boolean {
+  if (!data) return true;
+  if (isKeyRelease(data)) return true;
+  if (!isKeyRepeat(data)) return false;
+  return [keys.focus, keys.toggle, keys.wider, keys.narrower].some((key) =>
+    matchesConfiguredKey(data, key),
+  );
+}
+
+/**
  * Decode one raw terminal input chunk into a sidebar action.
  *
  * The sidebar is a real focus owner: while it is focused every key belongs to
  * it, so an `ignore` result still means "consume".
  */
-export function decodeSidebarKey(data: string, focusKey: string): SidebarAction {
+export function decodeSidebarKey(data: string, keys: SidebarKeyConfig): SidebarAction {
   if (!data) return { type: "ignore" };
 
   // Kitty protocol reports press, repeat and release. A release must never
-  // re-trigger an action: without this, pressing the focus key would focus on
-  // press and immediately unfocus again on the key-up event.
+  // re-trigger an action: without this, pressing a shortcut would act on press
+  // and act again on the key-up event.
   if (isKeyRelease(data)) return { type: "ignore" };
 
   // Auto-repeat is fine for navigation and typing, but commit-like actions
@@ -44,7 +93,8 @@ export function decodeSidebarKey(data: string, focusKey: string): SidebarAction 
 
   // Leave focus: the focus shortcut itself (so it toggles) or Escape.
   if (!repeat && matchesKey(data, "escape")) return { type: "exit" };
-  if (!repeat && isFocusKey(data, focusKey)) return { type: "exit" };
+  if (!repeat && matchesConfiguredKey(data, keys.focus)) return { type: "exit" };
+  if (!repeat && matchesConfiguredKey(data, keys.toggle)) return { type: "toggleSidebar" };
 
   if (matchesKey(data, "up")) return { type: "up" };
   if (matchesKey(data, "down")) return { type: "down" };
@@ -61,8 +111,8 @@ export function decodeSidebarKey(data: string, focusKey: string): SidebarAction 
 
   if (!repeat && matchesKey(data, "ctrl+n")) return { type: "new" };
   if (!repeat && matchesKey(data, "ctrl+r")) return { type: "rename" };
-  if (!repeat && isWiderKey(data)) return { type: "wider" };
-  if (!repeat && isNarrowerKey(data)) return { type: "narrower" };
+  if (!repeat && matchesConfiguredKey(data, keys.wider)) return { type: "wider" };
+  if (!repeat && matchesConfiguredKey(data, keys.narrower)) return { type: "narrower" };
   if (!repeat && matchesKey(data, "ctrl+u")) return { type: "clearSearch" };
   if (matchesKey(data, "backspace")) return { type: "backspace" };
   if (!repeat && matchesKey(data, "tab")) return { type: "right" };
@@ -72,21 +122,6 @@ export function decodeSidebarKey(data: string, focusKey: string): SidebarAction 
   if (printable) return { type: "type", text: printable };
 
   return { type: "ignore" };
-}
-
-/**
- * Events that must be swallowed no matter where focus is.
- *
- * Key releases carry no input content, but pi's editor does not filter them, so
- * a release would otherwise be matched again by the shortcut dispatcher — one
- * keypress would toggle focus twice. The same applies to auto-repeat of the
- * focus shortcut while it is held down.
- */
-export function isInertKeyEvent(data: string, focusKey: string): boolean {
-  if (!data) return true;
-  if (isKeyRelease(data)) return true;
-  if (isKeyRepeat(data) && isFocusKey(data, focusKey)) return true;
-  return false;
 }
 
 /**
@@ -105,45 +140,4 @@ function printableText(data: string): string | null {
     if (code < 32 || code === 127) return null;
   }
   return data;
-}
-
-/** True when `data` matches the configured focus shortcut (guarded cast). */
-function isFocusKey(data: string, focusKey: string): boolean {
-  try {
-    return matchesKey(data, focusKey as KeyId);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Raw sequences for the width shortcuts.
- *
- * The `=` / `-` key ids cover terminals that report the *base* key code (kitty
- * CSI-u sends `ESC[61;6u` for Shift+=), while the explicit sequences cover
- * terminals that report the *produced character* (`+` is codepoint 43). The
- * latter cannot be written as a key id at all: pi splits key ids on "+", so
- * "ctrl+shift++" parses to garbage and never matches.
- */
-const WIDER_SEQUENCES = ["\x1b[43;6u", "\x1b[27;6;43~", "\x1b[43;6~"];
-const NARROWER_SEQUENCES = ["\x1b[95;6u", "\x1b[27;6;95~", "\x1b[95;6~"];
-
-/** Ctrl+Shift+= (grow the sidebar). */
-export function isWiderKey(data: string): boolean {
-  if (WIDER_SEQUENCES.includes(data)) return true;
-  try {
-    return matchesKey(data, "ctrl+shift+=" as KeyId);
-  } catch {
-    return false;
-  }
-}
-
-/** Ctrl+Shift+- (shrink the sidebar). `_` is accepted for the shifted variant. */
-export function isNarrowerKey(data: string): boolean {
-  if (NARROWER_SEQUENCES.includes(data)) return true;
-  try {
-    return matchesKey(data, "ctrl+shift+-" as KeyId) || matchesKey(data, "ctrl+shift+_" as KeyId);
-  } catch {
-    return false;
-  }
 }

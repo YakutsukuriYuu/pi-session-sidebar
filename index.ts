@@ -8,17 +8,12 @@ import {
   saveConfig,
   setPendingRefocus,
   takePendingRefocus,
-  DEFAULT_FOCUS_KEY,
   MAX_WIDTH,
   MIN_WIDTH,
+  DEFAULT_KEYS,
 } from "./src/config.ts";
 import { SessionSidebarCompositor } from "./src/compositor.ts";
-import {
-  decodeSidebarKey,
-  isInertKeyEvent,
-  isNarrowerKey,
-  isWiderKey,
-} from "./src/keys.ts";
+import { decodeSidebarKey, isInertKeyEvent, matchesConfiguredKey } from "./src/keys.ts";
 import {
   filterSessions,
   flattenRows,
@@ -172,6 +167,27 @@ export default function (pi: ExtensionAPI) {
     schedulePaint();
   }
 
+  /**
+   * Show/hide the sidebar panel. The panel owns the reserved columns, so hiding
+   * hands pi's full width back and showing reserves it again; both are done by
+   * rebuilding the compositor (installCompositor disposes first and stays empty
+   * while disabled).
+   */
+  function setSidebarEnabled(enabled: boolean): void {
+    const changed = config.enabled !== enabled;
+    config = { ...config, enabled };
+    if (changed) saveConfig(config);
+    if (!enabled) exitFocus();
+    installCompositor();
+    requestPiRender();
+    schedulePaint();
+    currentCtx?.ui.notify(enabled ? "会话侧栏已显示" : "会话侧栏已隐藏", "info");
+  }
+
+  function toggleSidebar(): void {
+    setSidebarEnabled(!config.enabled);
+  }
+
   // --- Session list loading ----------------------------------------------------
   async function refreshSessions(): Promise<void> {
     if (refreshRunning) {
@@ -310,31 +326,48 @@ export default function (pi: ExtensionAPI) {
     toggleGroupCollapsed(cwd);
   }
 
-  // --- Raw keyboard input (focused sidebar only) ---------------------------------
+  // --- Raw keyboard input ---------------------------------------------------------
   function handleInput(data: string): { consume?: boolean; data?: string } | undefined {
-    // Key releases (and held-down repeats of the focus shortcut) are swallowed
+    // Key releases (and held-down repeats of the shortcut keys) are swallowed
     // regardless of focus. pi's editor does not filter kitty release events, so
-    // forwarding them would let the shortcut dispatcher fire twice per press —
-    // focus on press, focus away on release.
-    if (isInertKeyEvent(data, config.focusKey)) return { consume: true };
+    // forwarding them would let the shortcut dispatcher fire twice per press.
+    if (isInertKeyEvent(data, config.keys)) return { consume: true };
 
-    // Width shortcuts work globally, focused or not: Ctrl+Shift+= / Ctrl+Shift+-.
-    // Auto-repeat is swallowed instead of acted on, so holding the key does not
-    // race past the intended width.
-    const wider = isWiderKey(data);
-    const narrower = isNarrowerKey(data);
-    if (wider || narrower) {
-      if (!isKeyRepeat(data)) resizeSidebar(wider ? 1 : -1);
+    // The configured shortcuts work globally, focused or not. Auto-repeat is
+    // swallowed instead of acted on, so holding a key cannot race ahead (the
+    // panel would flip back and forth, or the width would run to the limit).
+    const repeat = isKeyRepeat(data);
+    if (matchesConfiguredKey(data, config.keys.focus)) {
+      if (!repeat) {
+        if (focused) exitFocus();
+        else enterFocus();
+      }
+      return { consume: true };
+    }
+    if (matchesConfiguredKey(data, config.keys.toggle)) {
+      if (!repeat) toggleSidebar();
+      return { consume: true };
+    }
+    if (matchesConfiguredKey(data, config.keys.wider)) {
+      if (!repeat) resizeSidebar(1);
+      return { consume: true };
+    }
+    if (matchesConfiguredKey(data, config.keys.narrower)) {
+      if (!repeat) resizeSidebar(-1);
       return { consume: true };
     }
 
     // Not focused: pi owns the keyboard, this extension stays out of the way.
     if (!focused) return undefined;
 
-    const action = decodeSidebarKey(data, config.focusKey);
+    const action = decodeSidebarKey(data, config.keys);
     switch (action.type) {
       case "exit":
         exitFocus();
+        return { consume: true };
+
+      case "toggleSidebar":
+        toggleSidebar();
         return { consume: true };
 
       case "up":
@@ -482,18 +515,10 @@ export default function (pi: ExtensionAPI) {
           else enterFocus();
           break;
         case "on":
-          config = { ...config, enabled: true };
-          saveConfig(config);
-          installCompositor();
-          ctx.ui.notify("会话侧栏已开启", "info");
+          setSidebarEnabled(true);
           break;
         case "off":
-          config = { ...config, enabled: false };
-          saveConfig(config);
-          exitFocus();
-          compositor?.dispose();
-          compositor = null;
-          ctx.ui.notify("会话侧栏已关闭（调整窗口大小后恢复全宽）", "info");
+          setSidebarEnabled(false);
           break;
         case "width": {
           const n = Number(rest[0]);
@@ -563,7 +588,9 @@ export default function (pi: ExtensionAPI) {
         }
         default:
           ctx.ui.notify(
-            `用法: /session-sidebar nav|on|off|width <n>|all|current|refresh —— 快捷键 ${config.focusKey} 聚焦侧栏`,
+            `用法: /session-sidebar nav|on|off|width <n>|all|current|refresh —— ` +
+              `快捷键: ${config.keys.focus} 聚焦 · ${config.keys.toggle} 显示/隐藏 · ` +
+              `${config.keys.wider}/${config.keys.narrower} 调宽`,
             "info",
           );
       }
@@ -571,20 +598,31 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // --- Shortcut: hand focus to the sidebar (and back) -------------------------------
-  pi.registerShortcut(config.focusKey as KeyId, {
+  // --- Shortcuts --------------------------------------------------------------------
+  // The input listener handles these first (it also supports key ids pi cannot
+  // express, such as the shifted "+" variant); registering them keeps the
+  // shortcuts discoverable in pi's own shortcut list.
+  pi.registerShortcut(config.keys.focus as KeyId, {
     description: "聚焦/离开会话侧栏（终端不支持该组合键时用 /session-sidebar nav）",
     handler: async (ctx) => {
       currentCtx = ctx;
       if (!config.enabled) {
-        ctx.ui.notify("会话侧栏已关闭，使用 /session-sidebar on 开启", "warning");
+        ctx.ui.notify(`会话侧栏已隐藏，用 ${config.keys.toggle} 显示`, "warning");
         return;
       }
       if (focused) exitFocus();
       else enterFocus();
     },
   });
+
+  pi.registerShortcut(config.keys.toggle as KeyId, {
+    description: "显示/隐藏会话侧栏",
+    handler: async (ctx) => {
+      currentCtx = ctx;
+      toggleSidebar();
+    },
+  });
 }
 
-/** Re-export for tests/tools that want the default focus key. */
-export { DEFAULT_FOCUS_KEY };
+/** Re-export for tests/tools that want the default shortcuts. */
+export { DEFAULT_KEYS };

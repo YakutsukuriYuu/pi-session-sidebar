@@ -28,6 +28,7 @@ ChatGPT 风格的左侧会话导航栏，直接嵌入 [Pi](https://pi.dev) 的�
 - **项目折叠**：`←` / `→` 折叠或展开项目分组
 - **窄终端自动折叠**：终端宽度小于 100 列时自动隐藏，恢复后自动出现
 - **宽度可调**：`Ctrl+Shift+=` 变宽 / `Ctrl+Shift+-` 变窄（每次 1 列，范围 20–60，自动记忆），或用 `/session-sidebar width 30`
+- **快捷键可自定义**：聚焦 / 显隐 / 加宽 / 变窄四个键都可在配置文件的 `keys` 段里改
 
 ## 安装
 
@@ -61,42 +62,70 @@ pi -e /path/to/pi-session-sidebar/index.ts
 | `Shift+Enter` | 切换到所选会话，**焦点留在侧栏** |
 | `Ctrl+N` | 新建会话 |
 | `Ctrl+R` | 重命名当前会话 |
-| `Esc` 或 `Ctrl+Shift+H` | 焦点交还右侧 |
+| `Esc` 或聚焦键 | 焦点交还右侧 |
 
-### 侧栏宽度（任意时刻可用，不要求聚焦）
+### 侧栏显示 / 隐藏与宽度（任意时刻可用，不要求聚焦）
 
 | 按键 | 作用 |
 | --- | --- |
+| `Ctrl+Shift+B` | 显示 / 隐藏侧栏面板 |
 | `Ctrl+Shift+=`（即 `Ctrl+Shift++`） | 侧栏变宽 1 列 |
 | `Ctrl+Shift+-` | 侧栏变窄 1 列 |
 
-- 范围 **20 – 60 列**，到达边界后再按无效并提示一次
-- 调整后立即重绘，并**写入 `config.json` 的 `sidebar.width`**，重启后保持
-- 长按不连续触发（重复事件被忽略），不会一次冲过目标宽度
-- 需要终端上报 shift 组合键（与你现有的 `Ctrl+Shift+H` 同一前提）；`+` 在部分终端上报的是字符码而非键码，插件已同时兼容两种格式
+- 隐藏时 pi 恢复全宽并自动释放焦点；重新显示后宽度设置不变
+- 宽度范围 **20 – 60 列**，到达边界后再按无效并提示一次
+- 宽度调整后立即重绘，并**写入配置文件**，重启后保持
+- 长按不连续触发（重复事件被忽略），不会一次冲过目标
+- 宽度键需要终端上报 shift 组合键（与你现有的 `Ctrl+Shift+H` 同一前提）；`+` 在部分终端上报的是字符码而非键码，插件已同时兼容两种格式
 - 聚焦时 `+` / `-` / `=` 仍然是普通搜索字符，不会误触发宽度调整
 
-### 命令
+### 配置
 
-```text
-/session-sidebar nav         聚焦/离开侧栏（不依赖快捷键，任何终端可用）
-/session-sidebar on          开启侧栏
-/session-sidebar off         关闭侧栏
-/session-sidebar width 30    设置宽度（20-60）
-/session-sidebar all         显示所有项目的会话（默认）
-/session-sidebar current     只显示当前项目的会话
-/session-sidebar refresh     手动刷新会话列表
-```
-
-配置保存在 `~/.pi/agent/pi-session-sidebar.json`：
+配置保存在 `~/.pi/agent/pi-session-sidebar.json`（修改后 `/reload` 生效；运行时的 on/off/width 变更会自动回写）：
 
 ```json
 {
   "enabled": true,
   "width": 30,
   "showAllProjects": true,
-  "focusKey": "ctrl+shift+h"
+  "keys": {
+    "focus": "ctrl+shift+h",
+    "toggle": "ctrl+shift+b",
+    "wider": "ctrl+shift+=",
+    "narrower": "ctrl+shift+-"
+  }
 }
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `enabled` | 侧栏是否显示（默认 `true`） |
+| `width` | 侧栏宽度，20–60（默认 `30`） |
+| `showAllProjects` | `false` 时只显示当前项目的会话 |
+| `keys.focus` | 聚焦 / 离开侧栏 |
+| `keys.toggle` | 显示 / 隐藏侧栏面板 |
+| `keys.wider` | 侧栏变宽 1 列 |
+| `keys.narrower` | 侧栏变窄 1 列 |
+
+**自定义按键**：`keys` 里可以用任何 pi 能识别的键名，例如 `"alt+s"`、`"ctrl+shift+j"`、`"f5"`。注意事项：
+
+- **不要用 pi 或 pi-tui 已占用的键**（如 `ctrl+c`、`ctrl+d`、`ctrl+o`、`ctrl+l`、`ctrl+-`、`ctrl+enter`、方向键等）。侧栏会全局消费这些键，pi 就再也收不到它们了
+- 同一按键不要重复配置给两个动作：判定顺序是 **focus → toggle → wider → narrower**，先匹配中的生效
+- 键名写错或无法解析时**不会崩溃**，只是该动作失效（可用 `/session-sidebar` 无参执行查看当前生效键位）
+- `Ctrl+Shift++` 这类带 `+` 的组合无法直接写成键名，用 `=` 代替（插件已兼容终端上报 `+` 字符码的情况）
+- 旧的写法 `"focusKey": "..."` 仍然兼容（等价于 `keys.focus`），保存后会自动迁移成 `keys` 形式
+
+### 命令
+
+```text
+/session-sidebar nav         聚焦/离开侧栏（不依赖快捷键，任何终端可用）
+/session-sidebar on          显示侧栏
+/session-sidebar off         隐藏侧栏
+/session-sidebar width 30    设置宽度（20-60）
+/session-sidebar all         显示所有项目的会话（默认）
+/session-sidebar current     只显示当前项目的会话
+/session-sidebar refresh     手动刷新会话列表
+/session-sidebar             无参数：打印当前生效的快捷键
 ```
 
 ## 工作原理

@@ -7,8 +7,14 @@ import assert from "node:assert/strict";
 import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src/model.ts";
 import type { SessionListEntry } from "../src/model.ts";
 import { renderSidebar, formatDate, clip } from "../src/render.ts";
-import { clampWidth, setPendingRefocus, takePendingRefocus } from "../src/config.ts";
-import { decodeSidebarKey, isInertKeyEvent, isNarrowerKey, isWiderKey } from "../src/keys.ts";
+import {
+  clampWidth,
+  setPendingRefocus,
+  takePendingRefocus,
+  DEFAULT_KEYS,
+  type SidebarKeyConfig,
+} from "../src/config.ts";
+import { decodeSidebarKey, isInertKeyEvent, matchesConfiguredKey } from "../src/keys.ts";
 
 function session(partial: Partial<SessionListEntry>): SessionListEntry {
   return {
@@ -235,9 +241,9 @@ assert.deepEqual(narrowSeen, ["\x1b[<0;40;10M"], "inactive sidebar leaves coordi
 inactiveComp.dispose();
 
 // --- sidebar key decoding ---------------------------------------------------
-const FOCUS_KEY = "ctrl+shift+h";
+const FOCUS_KEY = DEFAULT_KEYS.focus;
 const keyCase = (data: string): string => {
-  const a = decodeSidebarKey(data, FOCUS_KEY);
+  const a = decodeSidebarKey(data, DEFAULT_KEYS);
   return a.type === "switch" ? `switch:${a.keepFocus}` : a.type;
 };
 
@@ -271,11 +277,11 @@ assert.equal(keyCase("\x1b[1;1:2A"), "up", "held arrow still navigates");
 
 // These inert events must be swallowed even while pi has focus, otherwise the
 // editor's shortcut dispatcher would act on the release.
-assert.equal(isInertKeyEvent("\x1b[104;6:3u", FOCUS_KEY), true, "release swallowed when unfocused");
-assert.equal(isInertKeyEvent("\x1b[104;6:2u", FOCUS_KEY), true, "focus-key repeat swallowed");
-assert.equal(isInertKeyEvent("\x1b[104;6u", FOCUS_KEY), false, "press reaches the dispatcher");
-assert.equal(isInertKeyEvent("a", FOCUS_KEY), false, "ordinary keys untouched");
-assert.equal(isInertKeyEvent("\x1b[1;1:2A", FOCUS_KEY), false, "arrow repeat untouched");
+assert.equal(isInertKeyEvent("\x1b[104;6:3u", DEFAULT_KEYS), true, "release swallowed when unfocused");
+assert.equal(isInertKeyEvent("\x1b[104;6:2u", DEFAULT_KEYS), true, "focus-key repeat swallowed");
+assert.equal(isInertKeyEvent("\x1b[104;6u", DEFAULT_KEYS), false, "press reaches the dispatcher");
+assert.equal(isInertKeyEvent("a", DEFAULT_KEYS), false, "ordinary keys untouched");
+assert.equal(isInertKeyEvent("\x1b[1;1:2A", DEFAULT_KEYS), false, "arrow repeat untouched");
 assert.equal(keyCase("a"), "type", "plain letters feed the search box");
 assert.equal(keyCase("中"), "type", "wide characters feed the search box");
 assert.equal(keyCase("\x03"), "ignore", "Ctrl+C is swallowed while focused");
@@ -283,7 +289,7 @@ assert.equal(keyCase("\x1b[9;5u"), "ignore", "unbound keys are swallowed");
 
 // The focused sidebar must never leak keys to pi's editor.
 for (const raw of ["\x03", "\x1b[9;5u", "\x1bZ", "\x1b[3~"]) {
-  const action = decodeSidebarKey(raw, FOCUS_KEY);
+  const action = decodeSidebarKey(raw, DEFAULT_KEYS);
   assert.ok(action.type === "ignore" || action.type === "type", `consumed: ${JSON.stringify(raw)}`);
 }
 
@@ -298,7 +304,7 @@ for (const [seq, label] of [
   ["\x1b[27;6;43~", "modifyOtherKeys: '+' + ctrl+shift"],
 ] as const) {
   assert.equal(keyCase(seq), "wider", `wider: ${label}`);
-  assert.equal(isWiderKey(seq), true, `isWiderKey: ${label}`);
+  assert.equal(matchesConfiguredKey(seq, DEFAULT_KEYS.wider), true, `matchesConfiguredKey(wider): ${label}`);
 }
 for (const [seq, label] of [
   ["\x1b[45;6u", "kitty: '-' + ctrl+shift"],
@@ -307,26 +313,78 @@ for (const [seq, label] of [
   ["\x1b[27;6;95~", "modifyOtherKeys: '_' + ctrl+shift"],
 ] as const) {
   assert.equal(keyCase(seq), "narrower", `narrower: ${label}`);
-  assert.equal(isNarrowerKey(seq), true, `isNarrowerKey: ${label}`);
+  assert.equal(matchesConfiguredKey(seq, DEFAULT_KEYS.narrower), true, `matchesConfiguredKey(narrower): ${label}`);
 }
 
 // pi binds Ctrl+- to undo and the width keys are shift-modified, so neither
 // bare variant may resize the sidebar.
 assert.equal(keyCase("\x1b[45;5u"), "ignore", "Ctrl+- (pi's undo) must not shrink");
 assert.equal(keyCase("\x1b[61;5u"), "ignore", "Ctrl+= must not grow");
-assert.equal(isWiderKey("\x1b[61;5u"), false, "unmodified Ctrl+= is not a width key");
-assert.equal(isNarrowerKey("\x1b[45;5u"), false, "unmodified Ctrl+- is not a width key");
+assert.equal(matchesConfiguredKey("\x1b[61;5u", DEFAULT_KEYS.wider), false, "unmodified Ctrl+= is not a width key");
+assert.equal(matchesConfiguredKey("\x1b[45;5u", DEFAULT_KEYS.narrower), false, "unmodified Ctrl+- is not a width key");
 
 // Typing +/- must keep working in the search box while focused.
 assert.equal(keyCase("+"), "type", "'+' stays a search character");
 assert.equal(keyCase("-"), "type", "'-' stays a search character");
 assert.equal(keyCase("="), "type", "'=' stays a search character");
-assert.equal(isWiderKey("+"), false, "plain '+' is not the shortcut");
-assert.equal(isNarrowerKey("-"), false, "plain '-' is not the shortcut");
+assert.equal(matchesConfiguredKey("+", DEFAULT_KEYS.wider), false, "plain '+' is not the shortcut");
+assert.equal(matchesConfiguredKey("-", DEFAULT_KEYS.narrower), false, "plain '-' is not the shortcut");
 
 // Held keys must not race past the intended width (release/repeat are inert).
 assert.equal(keyCase("\x1b[61;6:3u"), "ignore", "width key RELEASE is inert");
 assert.equal(keyCase("\x1b[61;6:2u"), "ignore", "width key REPEAT does not re-fire");
+
+// --- show/hide shortcut + user-configurable keys --------------------------------
+assert.equal(
+  keyCase("\x1b[98;6u"),
+  "toggleSidebar",
+  "default toggle key (Ctrl+Shift+B) toggles the panel",
+);
+assert.equal(
+  matchesConfiguredKey("\x1b[98;6u", DEFAULT_KEYS.toggle),
+  true,
+  "default toggle key is Ctrl+Shift+B",
+);
+
+// Every shortcut can be replaced from the config file.
+const CUSTOM: SidebarKeyConfig = {
+  focus: "alt+s",
+  toggle: "alt+t",
+  wider: "alt+=",
+  narrower: "alt+-",
+};
+const customCase = (data: string): string => {
+  const a = decodeSidebarKey(data, CUSTOM);
+  return a.type === "switch" ? `switch:${a.keepFocus}` : a.type;
+};
+assert.equal(customCase("\x1bs"), "exit", "custom focus key works");
+assert.equal(customCase("\x1bt"), "toggleSidebar", "custom toggle key works");
+assert.equal(customCase("\x1b="), "wider", "custom wider key works");
+assert.equal(customCase("\x1b-"), "narrower", "custom narrower key works");
+assert.equal(
+  customCase("\x1b[104;6u"),
+  "ignore",
+  "default focus key is unbound once it is replaced",
+);
+assert.equal(
+  customCase("\x1b[98;6u"),
+  "ignore",
+  "default toggle key is unbound once it is replaced",
+);
+assert.equal(
+  isInertKeyEvent("\x1b[115;3:2u", CUSTOM),
+  true,
+  "repeat of a custom key is inert",
+);
+assert.equal(
+  isInertKeyEvent("\x1b[115;3u", CUSTOM),
+  false,
+  "press of a custom key is not inert",
+);
+
+// A malformed user-supplied key id must never throw.
+assert.equal(matchesConfiguredKey("a", "not+a+valid+key"), false, "bad key id is ignored");
+assert.equal(matchesConfiguredKey("a", ""), false, "empty key id is ignored");
 
 // Boundaries: one column per press, clamped to the configured range.
 assert.equal(clampWidth(20), 20, "minimum width kept");
