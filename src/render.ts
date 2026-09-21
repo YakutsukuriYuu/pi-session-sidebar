@@ -40,6 +40,21 @@ export function folder(text: string): string {
   return `${ANSI.fgBlue}${ANSI.bold}${text}${ANSI.reset}`;
 }
 
+/**
+ * Session-landing pulse. Two turns of the spinner, then the marker settles back
+ * to the steady dot. All frames are single-width in pi's width table.
+ */
+export const PULSE_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+const PULSE_FRAME_MS = 70;
+const PULSE_TURNS = 2;
+
+/** Spinner frame for `elapsedMs` since the landing began, or undefined when done. */
+export function pulseMarkerFor(elapsedMs: number): string | undefined {
+  const index = Math.floor(elapsedMs / PULSE_FRAME_MS);
+  if (index < 0 || index >= PULSE_FRAMES.length * PULSE_TURNS) return undefined;
+  return PULSE_FRAMES[index % PULSE_FRAMES.length];
+}
+
 /** ASCII cursor drawn in front of the selected row. */
 const CURSOR = "->>";
 
@@ -258,9 +273,10 @@ export function renderSidebar(
       if (!session) continue;
       const isCurrent =
         state.currentSessionFile !== undefined && session.path === state.currentSessionFile;
-      // `●` for the session pi is in, `│` as the hierarchy guide for the rest.
+      // `●` for the session pi is in (a spinner frame while it lands), `│` as
+      // the hierarchy guide for the rest.
       let marker = " ";
-      if (isCurrent) marker = accent("●");
+      if (isCurrent) marker = accent(state.pulseMarker ?? "●");
       else if (showGuide) marker = dim("│");
       const right = showTime ? dim(formatTimeFor(session.modified, now, timeBudget)) : "";
       const body = isCurrent ? accent(session.title) : session.title;
@@ -293,7 +309,10 @@ export function renderSidebar(
   if (below > 0) parts.push(`↓${below}`);
 
   let status: string;
-  if (state.loading) {
+  if (state.pendingSwitchLabel) {
+    // A switch is in flight: say where it is going instead of showing counters.
+    status = `⟳ 正在切换 → ${state.pendingSwitchLabel}`;
+  } else if (state.loading) {
     status = "加载中…";
   } else if (flat.length === 0) {
     status = searching ? "无匹配" : "暂无会话";

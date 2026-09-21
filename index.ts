@@ -1,5 +1,6 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { isKeyRepeat } from "@earendil-works/pi-tui";
 import {
@@ -13,7 +14,9 @@ import {
   DEFAULT_KEYS,
 } from "./src/config.ts";
 import { SessionSidebarCompositor } from "./src/compositor.ts";
+import { pulseMarkerFor } from "./src/render.ts";
 import { decodeSidebarKey, isInertKeyEvent, matchesConfiguredKeys, unusableConfiguredKeys } from "./src/keys.ts";
+import { listSessions } from "./src/sessions.ts";
 import {
   filterSessions,
   flattenRows,
@@ -31,6 +34,21 @@ const CMD = "/session-sidebar";
 
 /** Module state survives runtime rebinds, so this warning is once per process. */
 let warnedAboutUnusableFocusKeys = false;
+
+/**
+ * Session list cache. Kept at module scope (extension factories are cached) so a
+ * session switch repaints from memory instead of rescanning the directories.
+ */
+let sessionsCache: { entries: SessionListEntry[]; loadedAt: number } | null = null;
+
+/** How long a cached list is trusted before a scan runs again. */
+const CACHE_TTL_MS = 15_000;
+
+/** Pulse repaint interval, matching the frame duration in render.ts. */
+const PULSE_INTERVAL_MS = 70;
+
+/** How long the "switching to …" hint stays if the switch never lands. */
+const PENDING_SWITCH_MS = 5000;
 
 export default function (pi: ExtensionAPI) {
   let config = loadConfig();
@@ -56,8 +74,13 @@ export default function (pi: ExtensionAPI) {
   let compositor: SessionSidebarCompositor | null = null;
   let unsubscribeInput: (() => void) | null = null;
   let paintTimer: ReturnType<typeof setTimeout> | null = null;
-  let refreshRunning = false;
-  let refreshQueued = false;
+  /** Directories to scan for session files (depends on showAllProjects). */
+  let sessionRoots: string[] = [];
+  /** Set while a switch is being handed to pi, so the wait has feedback. */
+  let pendingSwitch: { title: string; at: number } | null = null;
+  /** Pulse animation state for the session we just switched to. */
+  let pulseTimer: ReturnType<typeof setInterval> | null = null;
+  let pulseStartedAt = 0;
 
   // --- Derived state ---------------------------------------------------------
   function buildState(): SidebarRenderState {
@@ -76,6 +99,11 @@ export default function (pi: ExtensionAPI) {
       focused,
       totalSessions: allSessions.length,
       focusKey: config.keys.focus,
+      pulseMarker: pulseStartedAt ? pulseMarkerFor(Date.now() - pulseStartedAt) : undefined,
+      pendingSwitchLabel:
+        pendingSwitch && Date.now() - pendingSwitch.at < PENDING_SWITCH_MS
+          ? pendingSwitch.title
+          : undefined,
     };
   }
 
@@ -194,40 +222,79 @@ export default function (pi: ExtensionAPI) {
   }
 
   // --- Session list loading ----------------------------------------------------
-  async function refreshSessions(): Promise<void> {
-    if (refreshRunning) {
-      refreshQueued = true;
+  /**
+   * Refresh the session list.
+   *
+   * The scan is synchronous and cheap (header line + stat per file, titles
+   * cached per file revision), and the result is cached across extension
+   * reloads — a session switch must never wait for a directory scan. Stale
+   * entries are still painted first, so the panel never goes blank.
+   */
+  function refreshSessions(force = false): void {
+    const now = Date.now();
+    const cache = sessionsCache;
+    if (!force && cache && now - cache.loadedAt < CACHE_TTL_MS) {
+      allSessions = cache.entries;
+      afterListChanged();
       return;
     }
-    refreshRunning = true;
-    loading = true;
-    schedulePaint();
+    if (cache) {
+      // Paint what we already know while the fresh scan runs.
+      allSessions = cache.entries;
+      afterListChanged();
+    }
     try {
-      const infos = config.showAllProjects
-        ? await SessionManager.listAll()
-        : await SessionManager.list(currentCwd || process.cwd());
-      allSessions = infos.map((info) => ({
-        path: info.path,
-        id: info.id,
-        cwd: info.cwd || "",
-        name: info.name,
-        title: info.name || info.firstMessage || "(空会话)",
-        modified: info.modified,
-        messageCount: info.messageCount,
-        firstMessage: info.firstMessage ?? "",
+      const listed = listSessions(sessionRoots).map((session) => ({
+        ...session,
+        title: session.name || session.firstMessage || "(空会话)",
       }));
+      sessionsCache = { entries: listed, loadedAt: Date.now() };
+      allSessions = listed;
     } catch {
       // Keep the previous list on failure.
-    } finally {
-      loading = false;
-      refreshRunning = false;
-      if (selectionPinnedToCurrent) selectCurrentSession();
-      clampSelection();
-      schedulePaint();
-      if (refreshQueued) {
-        refreshQueued = false;
-        void refreshSessions();
+    }
+    afterListChanged();
+  }
+
+  function afterListChanged(): void {
+    if (selectionPinnedToCurrent) selectCurrentSession();
+    clampSelection();
+    schedulePaint();
+  }
+
+  /** Session directories to scan: every project, or only the current one. */
+  function sessionRootsFor(ctx: ExtensionContext): string[] {
+    const defaultRoot = join(getAgentDir(), "sessions");
+    const currentDir = ctx.sessionManager.getSessionDir();
+    if (!config.showAllProjects) return currentDir ? [currentDir] : [defaultRoot];
+    const roots = [defaultRoot];
+    // A custom --session-dir can live outside the default root.
+    if (currentDir && !currentDir.startsWith(defaultRoot)) roots.push(currentDir);
+    return roots;
+  }
+
+  /** Run the landing pulse on the current session's marker, then stop. */
+  function startPulse(): void {
+    stopPulse();
+    pulseStartedAt = Date.now();
+    pulseTimer = setInterval(() => {
+      if (pulseMarkerFor(Date.now() - pulseStartedAt) === undefined) {
+        stopPulse();
+        return;
       }
+      schedulePaint();
+    }, PULSE_INTERVAL_MS);
+    schedulePaint();
+  }
+
+  function stopPulse(): void {
+    if (pulseTimer) {
+      clearInterval(pulseTimer);
+      pulseTimer = null;
+    }
+    if (pulseStartedAt) {
+      pulseStartedAt = 0;
+      schedulePaint();
     }
   }
 
@@ -514,10 +581,26 @@ export default function (pi: ExtensionAPI) {
           if (!action.keepFocus) exitFocus();
           return { consume: true };
         }
-        return submitCommand(
+        const injected = submitCommand(
           `switch ${target.session.id}`,
           action.keepFocus ? "refocus" : "unfocus",
         );
+        if (injected.data) {
+          // The switch is on its way: say so, so the wait is not silent. Paint
+          // synchronously — a debounced paint would lose the race against the
+          // very switch this hint is about. The extension instance on the other
+          // side starts fresh, so the hint simply stops existing there.
+          pendingSwitch = { title: target.session.title, at: Date.now() };
+          compositor?.paint();
+          const timer = setTimeout(() => {
+            if (pendingSwitch && Date.now() - pendingSwitch.at >= PENDING_SWITCH_MS) {
+              pendingSwitch = null;
+              schedulePaint();
+            }
+          }, PENDING_SWITCH_MS + 200);
+          timer.unref?.();
+        }
+        return injected;
       }
 
       case "new":
@@ -587,12 +670,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   // --- Extension wiring ------------------------------------------------------------
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     currentCtx = ctx;
     currentCwd = ctx.cwd;
     currentSessionFile = ctx.sessionManager.getSessionFile();
     focused = false;
     searchQuery = null;
+    pendingSwitch = null;
+    sessionRoots = sessionRootsFor(ctx);
 
     if (!ctx.hasUI) return;
 
@@ -627,11 +712,21 @@ export default function (pi: ExtensionAPI) {
 
     warnAboutUnusableFocusKeys();
 
-    await refreshSessions();
+    // Paint from the module cache first: a switch must not wait for a scan. The
+    // TTL decides whether a fresh scan runs at all.
+    refreshSessions(false);
     if (focused) selectCurrentSession();
+
+    // Arriving in a session (a switch, a fork, a new session) gets a short pulse
+    // on its marker so the switch has a visible landing.
+    if (event.reason === "resume" || event.reason === "fork" || event.reason === "new") {
+      startPulse();
+    }
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", () => {
+    stopPulse();
+    pendingSwitch = null;
     unsubscribeInput?.();
     unsubscribeInput = null;
     compositor?.dispose();
@@ -642,17 +737,18 @@ export default function (pi: ExtensionAPI) {
     searchQuery = null;
   });
 
-  pi.on("session_info_changed", async () => {
-    void refreshSessions();
+  pi.on("session_info_changed", () => {
+    // A rename must show at once, so this one skips the cache TTL.
+    refreshSessions(true);
   });
 
   // Repaint when the agent settles so the current session's timestamp stays fresh.
-  pi.on("agent_settled", async () => {
-    void refreshSessions();
+  pi.on("agent_settled", () => {
+    refreshSessions(false);
   });
 
-  pi.on("session_tree", async () => {
-    void refreshSessions();
+  pi.on("session_tree", () => {
+    refreshSessions(false);
   });
 
   // --- Commands ------------------------------------------------------------------
@@ -687,17 +783,20 @@ export default function (pi: ExtensionAPI) {
         case "all":
           config = { ...config, showAllProjects: true };
           saveConfig(config);
-          void refreshSessions();
+          sessionRoots = sessionRootsFor(ctx);
+          refreshSessions(true);
           ctx.ui.notify("显示所有项目的会话", "info");
           break;
         case "current":
           config = { ...config, showAllProjects: false };
           saveConfig(config);
-          void refreshSessions();
+          sessionRoots = sessionRootsFor(ctx);
+          refreshSessions(true);
           ctx.ui.notify("只显示当前项目的会话", "info");
           break;
         case "refresh":
-          void refreshSessions();
+          sessionRoots = sessionRootsFor(ctx);
+          refreshSessions(true);
           ctx.ui.notify("会话列表已刷新", "info");
           break;
         // --- Internal subcommands (used by focused-sidebar key handling) --------

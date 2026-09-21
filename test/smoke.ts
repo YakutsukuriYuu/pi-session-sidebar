@@ -6,7 +6,11 @@
 import assert from "node:assert/strict";
 import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src/model.ts";
 import type { SessionListEntry } from "../src/model.ts";
-import { renderSidebar, formatDate, clip } from "../src/render.ts";
+import { renderSidebar, formatDate, clip, pulseMarkerFor, PULSE_FRAMES } from "../src/render.ts";
+import { listSessions, titleCacheSize } from "../src/sessions.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   clampWidth,
   setPendingRefocus,
@@ -658,5 +662,63 @@ assert.equal(
 );
 assert.deepEqual(unusableConfiguredKeys(focusList), [], "every key is usable with kitty on");
 setKittyProtocolActive(false);
+
+
+// --- lightweight session lister ----------------------------------------------
+// Reading only the header line plus two small slices keeps a refresh cheap; the
+// title cache is keyed by file revision, so unchanged files are never re-read.
+const tempRoot = mkdtempSync(join(tmpdir(), "sidebar-lister-"));
+const projDir = join(tempRoot, "--tmp-myproj--");
+mkdirSync(projDir, { recursive: true });
+const sessionFile = join(projDir, "2026-01-01T00-00-00-000Z_abc.jsonl");
+const header = { type: "session", version: 3, id: "abc", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp/myproj" };
+const userMessage = {
+  type: "message",
+  id: "m1",
+  parentId: null,
+  timestamp: "2026-01-01T00:00:01.000Z",
+  message: { role: "user", content: "修复登录 bug\n第二行" },
+};
+writeFileSync(sessionFile, [JSON.stringify(header), JSON.stringify(userMessage)].join("\n") + "\n");
+
+const listed = listSessions([tempRoot]);
+assert.equal(listed.length, 1, "one session file is listed");
+assert.equal(listed[0].id, "abc", "id comes from the header line");
+assert.equal(listed[0].cwd, "/tmp/myproj", "cwd comes from the header line");
+assert.equal(listed[0].firstMessage, "修复登录 bug", "first user message becomes the summary");
+assert.equal(listed[0].name, undefined, "an unnamed session has no name");
+
+// A rename appends a session_info entry; the file revision changes so the cached
+// title must be recomputed.
+writeFileSync(
+  sessionFile,
+  [
+    JSON.stringify(header),
+    JSON.stringify(userMessage),
+    JSON.stringify({ type: "session_info", id: "n1", parentId: "m1", timestamp: "2026-01-02T00:00:00.000Z", name: "重命名后的会话" }),
+  ].join("\n") + "\n",
+);
+const renamed = listSessions([tempRoot]);
+assert.equal(renamed[0].name, "重命名后的会话", "a rename in the tail is picked up");
+assert.equal(titleCacheSize() > 0, true, "titles are cached per file");
+
+// Reading the same revision again must not need another pass, and a deleted file
+// must not leave a stale cache entry behind.
+const before = titleCacheSize();
+listSessions([tempRoot]);
+assert.equal(titleCacheSize(), before, "cache size is stable for unchanged files");
+rmSync(sessionFile);
+assert.equal(listSessions([tempRoot]).length, 0, "a deleted session disappears");
+assert.equal(titleCacheSize(), 0, "cache is pruned when the file is gone");
+rmSync(tempRoot, { recursive: true, force: true });
+
+// --- landing pulse -----------------------------------------------------------
+assert.equal(pulseMarkerFor(0), PULSE_FRAMES[0], "pulse starts on the first frame");
+assert.equal(pulseMarkerFor(PULSE_FRAMES.length * 70), PULSE_FRAMES[0], "the pulse loops");
+assert.equal(pulseMarkerFor(PULSE_FRAMES.length * 2 * 70), undefined, "the pulse ends after two turns");
+assert.equal(pulseMarkerFor(-1), undefined, "a negative age has no frame");
+for (const frame of PULSE_FRAMES) {
+  assert.equal([...frame].length, 1, `pulse frame is single width: ${frame}`);
+}
 
 console.log("✓ all smoke tests passed");

@@ -32,6 +32,10 @@ export interface SidebarRenderState {
   totalSessions?: number;
   /** Configured focus shortcut, so the hint line shows the real key. */
   focusKey?: string;
+  /** Spinner frame shown on the current session's marker while landing. */
+  pulseMarker?: string;
+  /** Target session title while a switch is in flight. */
+  pendingSwitchLabel?: string;
 }
 
 export interface FlatRow {
