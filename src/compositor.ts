@@ -53,6 +53,8 @@ function descriptorFor(obj: AnyObject, key: string): PropertyDescriptor | undefi
  *  3. After pi's frame, paint the sidebar into columns 1..width with absolute
  *     cursor positioning, saving/restoring the cursor (DECSC/DECRC) and only
  *     rewriting rows that changed.
+ *  4. Rewrite incoming mouse columns by -width, because pi maps mouse
+ *     coordinates onto its content space as if the content started at column 1.
  */
 export class SessionSidebarCompositor {
   private tui: any;
@@ -61,6 +63,7 @@ export class SessionSidebarCompositor {
   private originalColumnsDesc: PropertyDescriptor | undefined;
   private originalColumnsOwnDesc: PropertyDescriptor | undefined;
   private originalDoRender: ((...args: any[]) => any) | null = null;
+  private originalHandleTerminalInput: ((data: string) => void) | null = null;
   private originalWrite: (data: string) => void;
   private disposed = false;
 
@@ -176,6 +179,60 @@ export class SessionSidebarCompositor {
         return result;
       };
     }
+
+    this.patchInput();
+  }
+
+  /**
+   * Rewrite mouse coordinates at the TUI input entry point.
+   *
+   * pi maps a mouse event's absolute terminal column straight onto its own
+   * content column (`x: rawX - 1`), but this compositor renders pi's content
+   * shifted right by `reservedWidth`. Without correction, clicks, drag
+   * selections and the wheel are all off by exactly the sidebar width.
+   *
+   * The patch must sit here rather than in an onTerminalInput listener: pi's
+   * fullscreen viewport registers its own listener while the TUI is
+   * constructed (before extensions load) and consumes every mouse sequence.
+   */
+  private patchInput(): void {
+    const tui = this.tui as { handleTerminalInput?: (data: string) => void };
+    if (typeof tui.handleTerminalInput !== "function") return;
+    const original = tui.handleTerminalInput.bind(this.tui);
+    this.originalHandleTerminalInput = original;
+    const self = this;
+    tui.handleTerminalInput = function (data: string) {
+      const fixed = self.shiftMouseColumns(data);
+      // An empty result means the pointer is over the sidebar: swallow the
+      // event so pi never sees a phantom click at the first content column.
+      if (fixed === "") return;
+      return original(fixed);
+    };
+  }
+
+  /**
+   * Translate SGR mouse columns (`ESC[<b;x;yM/m`) from terminal space into
+   * pi's content space. Returns "" when the event must be dropped.
+   */
+  private shiftMouseColumns(data: string): string {
+    if (!data.includes("\x1b[<")) return data;
+    if (!this.active()) return data;
+    const w = this.reservedWidth;
+    return data.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (match, b, x, y, kind) => {
+      const rawX = Number(x);
+      if (rawX > w) return `\x1b[<${b};${rawX - w};${y}${kind}`;
+
+      const button = Number(b);
+      const isWheel = (button & 64) !== 0;
+      const isMotion = (button & 32) !== 0;
+      const isRelease = kind === "m" || (button & 3) === 3;
+      // Dragging into the sidebar, the wheel and the release that ends a drag
+      // all keep working, clamped to pi's first content column. A plain press
+      // over the panel is dropped instead, so clicking the sidebar never moves
+      // pi's cursor or clears a selection.
+      if (isWheel || isMotion || isRelease) return `\x1b[<${b};1;${y}${kind}`;
+      return "";
+    });
   }
 
   /** Standalone repaint (state change outside a pi render cycle). */
@@ -314,6 +371,11 @@ export class SessionSidebarCompositor {
 
     if (this.originalDoRender !== null) {
       this.tui.doRender = this.originalDoRender;
+    }
+
+    if (this.originalHandleTerminalInput !== null) {
+      this.tui.handleTerminalInput = this.originalHandleTerminalInput;
+      this.originalHandleTerminalInput = null;
     }
   }
 }

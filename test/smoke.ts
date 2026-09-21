@@ -169,6 +169,71 @@ assert.ok(narrowFrame.includes("\x1b[2K"), "narrow: erase untouched");
 assert.ok(autoHidden, "auto-hide callback fired");
 comp2.dispose();
 
+// --- mouse coordinates must be translated into pi's content space ------------
+// pi maps a mouse event's absolute terminal column straight onto its own column
+// (`x: rawX - 1`), so with the content shifted right by the sidebar width every
+// click / drag / wheel would land `width` columns to the left of the pointer.
+const makeMouseTui = (columns: number) => {
+  const seen: string[] = [];
+  const tui: any = {
+    terminal: { columns, rows: 40, write() {} },
+    // Sink: the compositor forwards the corrected sequence here.
+    handleTerminalInput(data: string) {
+      seen.push(data);
+    },
+  };
+  return { tui, seen };
+};
+const { tui: mouseTui, seen: mouseSeen } = makeMouseTui(120);
+const mouseComp = new SessionSidebarCompositor(
+  mouseTui,
+  () => ({ ...state, flatRows: [], groups: [] }),
+  30,
+  100,
+);
+mouseComp.install();
+
+mouseTui.handleTerminalInput("\x1b[<0;40;10M");
+assert.deepEqual(mouseSeen, ["\x1b[<0;10;10M"], "click shifted by the sidebar width");
+
+mouseSeen.length = 0;
+mouseTui.handleTerminalInput("\x1b[<32;41;12M");
+assert.deepEqual(mouseSeen, ["\x1b[<32;11;12M"], "drag motion shifted");
+
+mouseSeen.length = 0;
+mouseTui.handleTerminalInput("\x1b[<0;10;10M");
+assert.deepEqual(mouseSeen, [], "plain click over the sidebar is dropped, not sent to column 1");
+
+mouseSeen.length = 0;
+mouseTui.handleTerminalInput("\x1b[<64;5;10M");
+assert.deepEqual(mouseSeen, ["\x1b[<64;1;10M"], "wheel over the sidebar still scrolls");
+
+mouseSeen.length = 0;
+mouseTui.handleTerminalInput("\x1b[<32;2;20M");
+assert.deepEqual(mouseSeen, ["\x1b[<32;1;20M"], "dragging left into the sidebar clamps to column 1");
+
+mouseSeen.length = 0;
+mouseTui.handleTerminalInput("\x1b[<0;5;10m");
+assert.deepEqual(mouseSeen, ["\x1b[<0;1;10m"], "release over the sidebar is clamped");
+
+mouseSeen.length = 0;
+mouseTui.handleTerminalInput("a");
+assert.deepEqual(mouseSeen, ["a"], "non-mouse input is untouched");
+mouseComp.dispose();
+
+// Inactive sidebar (narrow terminal) renders no shift, so no correction either.
+const { tui: narrowRawTui, seen: narrowSeen } = makeMouseTui(80);
+const inactiveComp = new SessionSidebarCompositor(
+  narrowRawTui,
+  () => ({ ...state, flatRows: [], groups: [] }),
+  30,
+  100,
+);
+inactiveComp.install();
+narrowRawTui.handleTerminalInput("\x1b[<0;40;10M");
+assert.deepEqual(narrowSeen, ["\x1b[<0;40;10M"], "inactive sidebar leaves coordinates alone");
+inactiveComp.dispose();
+
 // --- sidebar key decoding ---------------------------------------------------
 const FOCUS_KEY = "ctrl+shift+h";
 const keyCase = (data: string): string => {

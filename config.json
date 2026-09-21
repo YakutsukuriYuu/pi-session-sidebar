@@ -1,0 +1,10 @@
+{
+  "shiftEnter": {
+    "enabled": true,
+    "mode": "same",
+    "piPath": "pi",
+    "terminal": {
+      "type": "system"
+    }
+  }
+}
