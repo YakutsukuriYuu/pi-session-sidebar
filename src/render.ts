@@ -9,8 +9,6 @@ export const ANSI = {
   dim: esc("2"),
   underline: esc("4"),
   inverse: esc("7"),
-  /** Draws the selection frame's top edge on the row's own cells. */
-  overline: esc("53"),
   fgGray: esc("90"),
   fgBlue: esc("94"),
   fgCyan: esc("96"),
@@ -42,22 +40,15 @@ export function folder(text: string): string {
   return `${ANSI.fgBlue}${ANSI.bold}${text}${ANSI.reset}`;
 }
 
-/** Half-width vertical bars used as the frame's sides (measured single-width). */
-const FRAME_LEFT = "▏";
-const FRAME_RIGHT = "▕";
-/** Columns the frame's two side bars occupy. */
-const FRAME_BARS = 2;
+/** ASCII cursor drawn in front of the selected row. */
+const CURSOR = "->>";
 
 /**
- * Wrap a row's content in the selection frame.
- *
- * A literal `┌─┐` box needs a terminal row per edge, which would overwrite the
- * sessions above and below the selection. So the top edge is drawn by the
- * overline attribute and the bottom edge by the underline attribute: the whole
- * rectangle lives inside the selected row itself, with no extra rows.
+ * The cursor on the selected row, in the colour that names the row's kind
+ * (blue folder, cyan current session, white anything else).
  */
-export function framed(content: string, color: string): string {
-  return `${ANSI.overline}${ANSI.underline}${color}${FRAME_LEFT}${content}${FRAME_RIGHT}${ANSI.reset}`;
+export function cursor(color: string): string {
+  return `${color}${ANSI.bold}${CURSOR}${ANSI.reset}`;
 }
 
 /** Columns before a session title: two-space indent, marker, space. */
@@ -152,11 +143,11 @@ function joinSides(left: string, right: string, width: number): string {
 }
 
 /**
- * One list row: `lead marker body ………right`, framed when it owns the cursor.
+ * One list row: `cursor`/`lead+marker` then the body and an optional right part.
  *
- * The lead is one column shorter for the selected row: the frame's left bar
- * takes that column, so the marker and the text stay in exactly the same
- * columns whether or not the row is selected.
+ * The cursor replaces the lead and the marker on the selected row instead of
+ * being added in front of them, so a session's marker column and title column
+ * do not move when the cursor arrives.
  */
 function rowLine(spec: {
   lead: string;
@@ -164,21 +155,16 @@ function rowLine(spec: {
   body: string;
   right: string;
   selected: boolean;
-  frameColor: string;
+  cursor: string;
   width: number;
 }): string {
-  const lead = spec.selected ? spec.lead.slice(0, -1) : spec.lead;
-  const leadWidth = visibleWidth(lead);
-  const markerWidth = visibleWidth(spec.marker);
   const rightWidth = spec.right ? visibleWidth(spec.right) : 0;
   const gap = spec.right ? 1 : 0;
-  const available = spec.width - leadWidth - (spec.selected ? FRAME_BARS : 0);
-  const bodyWidth = Math.max(1, available - markerWidth - 1 - rightWidth - gap);
+  const prefix = spec.selected ? `${spec.cursor} ` : `${spec.lead}${spec.marker} `;
+  const bodyWidth = Math.max(1, spec.width - visibleWidth(prefix) - rightWidth - gap);
   const inner =
-    `${spec.marker} ${pad(clip(spec.body, bodyWidth), bodyWidth)}` +
-    (spec.right ? ` ${spec.right}` : "");
-  if (!spec.selected) return pad(lead + inner, spec.width);
-  return lead + framed(inner, spec.frameColor);
+    pad(clip(spec.body, bodyWidth), bodyWidth) + (spec.right ? ` ${spec.right}` : "");
+  return pad(prefix + inner, spec.width);
 }
 
 /**
@@ -253,24 +239,17 @@ export function renderSidebar(
     if (isSelected) selectedLineIndex = lines.length;
 
     if (row.kind === "group") {
-      // Folder rows: icon in column 2, blue label, count right-aligned. The bar
-      // marks the project pi is currently running in; the selection frame takes
-      // its place while this row owns the cursor.
+      // Folder rows: blue icon in column 2, blue label, count right-aligned. The
+      // bar marks the project pi is currently running in.
       const isCurrentProject = group.cwd === state.currentCwd;
-      const isCursor = isSelected && state.focused;
-      // The bar marks the project pi is in; the selection frame takes its place
-      // while this row owns the cursor.
-      let lead = " ";
-      if (isCursor) lead = "";
-      else if (isCurrentProject) lead = folder("▌");
       lines.push(
         rowLine({
-          lead,
+          lead: isCurrentProject ? folder("▌") : " ",
           marker: folder(group.collapsed ? "▢" : "▣"),
           body: folder(group.label),
           right: dim(`${group.sessions.length}`),
-          selected: isCursor,
-          frameColor: ANSI.fgBlue,
+          selected: isSelected && state.focused,
+          cursor: cursor(ANSI.fgBlue),
           width: inner,
         }),
       );
@@ -292,9 +271,9 @@ export function renderSidebar(
           body,
           right,
           selected: isSelected && state.focused,
-          // Cyan keeps meaning "the session pi is in"; other rows get a neutral
-          // stroke, so the frame colour stays a reliable hint.
-          frameColor: isCurrent ? ANSI.fgCyan : ANSI.fgWhite,
+          // Cyan keeps meaning "the session pi is in"; anything else gets a
+          // neutral cursor, so the colour stays a reliable hint.
+          cursor: cursor(isCurrent ? ANSI.fgCyan : ANSI.fgWhite),
           width: inner,
         }),
       );

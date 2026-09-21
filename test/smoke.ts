@@ -79,10 +79,10 @@ assert.ok(
   "session title rendered",
 );
 assert.ok(rendered.selectedLineIndex !== null, "selection visible");
-const selectedFrame = rendered.lines[rendered.selectedLineIndex ?? 0];
-assert.ok(selectedFrame.includes("\x1b[53m"), "selected row draws the frame's top edge");
-assert.ok(selectedFrame.includes("\x1b[4m"), "selected row draws the frame's bottom edge");
-assert.ok(!selectedFrame.includes("\x1b[7m"), "selection no longer relies on inverse video");
+const selectedCursor = rendered.lines[rendered.selectedLineIndex ?? 0];
+assert.ok(selectedCursor.includes("->>"), "selected row carries the cursor");
+assert.ok(!selectedCursor.includes("\x1b[7m"), "selection does not rely on inverse video");
+assert.ok(!selectedCursor.includes("\x1b[53m"), "selection no longer draws a frame");
 
 const longTitle = renderSidebar(
   { ...state, groups: groupSessions([session({ id: "9", title: "x".repeat(200) })], "/proj/a", new Set(), true) },
@@ -159,8 +159,8 @@ assert.ok(wide.some((l) => /\d{1,2}:\d{2}/.test(l)), "time column appears at 30 
 assert.ok(wide.some((l) => l.includes("│")), "guide column appears at 30 columns");
 assert.ok(wide[0].includes("1项目·3会话"), "full counts at 30 columns");
 assert.ok(wide.some((l) => l.includes("●")), "current session is marked with ●");
-// The selection frame takes the bar's column while the cursor sits on the
-// folder row, so check the marker with the cursor on a session instead.
+// The current-project bar is replaced by the cursor while it sits on the folder
+// row, so check the marker with the cursor on a session instead.
 assert.ok(
   draw(30, 12, { selectedIndex: 1 }).some((l) => l.includes("▌")),
   "current project is marked with ▌",
@@ -206,16 +206,22 @@ const plainWide = rawWide.map(plainLine);
 const folderOf = (lines: string[]) => lines.find((l) => l.includes("▣") || l.includes("▢")) ?? "";
 const sessionOf = (lines: string[], title: string) =>
   lines.find((line) => plainLine(line).includes(title)) ?? "";
+const cursorRow = (lines: string[]) => lines.find((l) => l.includes("->>")) ?? "";
 
-// A folder gets its own colour and a container icon; sessions never do.
-assert.ok(folderOf(rawWide).includes("▣"), "expanded folder uses the filled icon");
-assert.ok(folderOf(rawWide).includes("\x1b[94m"), "folder row is drawn in the folder colour");
+// A folder gets its own colour and a container icon; sessions never do. The
+// cursor replaces the icon while it sits on a folder row, so read the icon with
+// the cursor parked on a session.
+const cursorOnSession = rawLines(30, { selectedIndex: 1 });
+assert.ok(folderOf(cursorOnSession).includes("▣"), "expanded folder uses the filled icon");
+assert.ok(folderOf(cursorOnSession).includes("\x1b[94m"), "folder row is drawn in the folder colour");
 
-// Icons follow the collapse state.
+// Icons follow the collapse state. Read them with the sidebar unfocused: the
+// cursor replaces the icon while it sits on a folder row.
 const collapsedGroups = groupSessions(uiSessions, "/proj/p", new Set(["/proj/p"]), true);
 const collapsedRaw = rawLines(30, {
   groups: collapsedGroups,
   flatRows: flattenRows(collapsedGroups),
+  focused: false,
 });
 assert.ok(collapsedRaw.some((l) => l.includes("▢")), "collapsed folder uses the hollow icon");
 assert.ok(!collapsedRaw.some((l) => l.includes("▣")), "filled icon only while expanded");
@@ -232,36 +238,39 @@ assert.equal(
   "ordinary sessions are not drawn in the folder colour",
 );
 
-// Selection is a rectangular frame: an overline top edge, an underline bottom
-// edge and half-width side bars, all inside the row itself. It reads the same on
-// any terminal theme and never fights the colours inside the row.
-const folderSelected = folderOf(rawLines(30, { selectedIndex: 0 }));
-assert.ok(
-  folderSelected.includes("▏") && folderSelected.includes("▕"),
-  "folder selection draws the side bars",
-);
-assert.ok(folderSelected.includes("\x1b[53m"), "folder selection draws the top edge");
-assert.ok(folderSelected.includes("\x1b[94m"), "folder frame keeps the folder colour");
+// Selection is an ASCII cursor (`->>`) in the row's kind colour. It replaces
+// the lead and marker rather than being prepended, so a session's marker and
+// title columns do not move when the cursor arrives.
+const folderSelected = cursorRow(rawLines(30, { selectedIndex: 0 }));
+assert.ok(folderSelected.includes("->>"), "folder selection draws the cursor");
+assert.ok(folderSelected.includes("\x1b[94m"), "folder cursor keeps the folder colour");
 assert.ok(!folderSelected.includes("\x1b[7m"), "folder selection does not invert");
+assert.ok(!folderSelected.includes("\x1b[53m"), "folder selection draws no frame");
 
-const sessionSelected = sessionOf(rawLines(30, { selectedIndex: 1 }), "今天的会话");
-assert.ok(
-  sessionSelected.includes("▏") && sessionSelected.includes("▕"),
-  "session selection draws the side bars",
-);
-assert.ok(sessionSelected.includes("\x1b[53m"), "session selection draws the top edge");
-assert.ok(sessionSelected.includes("\x1b[96m"), "the current session keeps its cyan frame");
+const sessionSelected = cursorRow(rawLines(30, { selectedIndex: 1 }));
+assert.ok(sessionSelected.includes("今天的会话"), "the cursor row is the selected session");
+assert.ok(sessionSelected.includes("\x1b[96m"), "the current session keeps its cyan cursor");
 assert.ok(!sessionSelected.includes("\x1b[7m"), "session selection does not invert");
-assert.ok(
-  !sessionSelected.slice(sessionSelected.lastIndexOf("▕")).includes("\x1b[53m"),
-  "frame attributes do not leak past the right bar",
+
+// The cursor belongs to the selection only: none is drawn while pi has focus.
+assert.equal(
+  rawLines(30, { focused: false }).filter((l) => l.includes("->>")).length,
+  0,
+  "no cursor while the sidebar is unfocused",
+);
+assert.equal(
+  plainWide.filter((l) => l.includes("->>")).length,
+  1,
+  "exactly one row carries the cursor",
 );
 
-// The frame belongs to the cursor: none is drawn while pi owns the keyboard.
+// The cursor occupies the same columns the marker used, so text never shifts.
+const withCursor = plainLine(sessionSelected);
+const withoutCursor = plainLine(sessionOf(rawLines(30, { selectedIndex: 2 }), "今天的会话"));
 assert.equal(
-  rawLines(30, { focused: false }).filter((l) => l.includes("\x1b[53m")).length,
-  0,
-  "no frame while the sidebar is unfocused",
+  withCursor.indexOf("今天的会话"),
+  withoutCursor.indexOf("今天的会话"),
+  "the title column is identical whether or not the row is selected",
 );
 
 // --- shiftRight transform (re-implemented here to test the regex logic) ----
