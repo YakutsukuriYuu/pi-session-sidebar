@@ -1,24 +1,22 @@
 {
   "name": "pi-session-sidebar",
-  "version": "0.2.0",
-  "description": "ChatGPT-style left session sidebar + native-grade session picker (/r) for the pi coding agent TUI. Merged successor of pi-resume-plus.",
+  "version": "0.1.0",
+  "description": "ChatGPT-style left session navigation sidebar for the pi coding agent TUI",
   "license": "MIT",
   "type": "module",
-  "keywords": ["pi-package"],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types test/smoke.ts && node tests/run.mjs",
-    "test:sidebar": "node --experimental-strip-types test/smoke.ts",
-    "test:picker": "node tests/run.mjs",
-    "test:tui": "python3 tests/tui.py",
+    "test": "node --experimental-strip-types test/smoke.ts",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.6.0"
+    "@types/node": "^26.6.2",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.86.1",

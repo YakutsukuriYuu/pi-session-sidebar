@@ -15,8 +15,6 @@ export type SidebarAction =
   | { type: "switch"; keepFocus: boolean }
   | { type: "new" }
   | { type: "rename" }
-  | { type: "delete" }
-  | { type: "openExternal" }
   | { type: "backspace" }
   | { type: "clearSearch" }
   | { type: "type"; text: string }
@@ -60,8 +58,6 @@ export function decodeSidebarKey(data: string, focusKey: string): SidebarAction 
 
   if (!repeat && matchesKey(data, "ctrl+n")) return { type: "new" };
   if (!repeat && matchesKey(data, "ctrl+r")) return { type: "rename" };
-  if (!repeat && matchesKey(data, "ctrl+d")) return { type: "delete" };
-  if (!repeat && matchesKey(data, "ctrl+o")) return { type: "openExternal" };
   if (!repeat && matchesKey(data, "ctrl+u")) return { type: "clearSearch" };
   if (matchesKey(data, "backspace")) return { type: "backspace" };
   if (!repeat && matchesKey(data, "tab")) return { type: "right" };
