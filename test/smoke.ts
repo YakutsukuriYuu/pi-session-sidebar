@@ -79,7 +79,10 @@ assert.ok(
   "session title rendered",
 );
 assert.ok(rendered.selectedLineIndex !== null, "selection visible");
-assert.ok(rendered.lines[rendered.selectedLineIndex ?? 0].includes("\x1b[7m"), "selected row inverted");
+const selectedFrame = rendered.lines[rendered.selectedLineIndex ?? 0];
+assert.ok(selectedFrame.includes("\x1b[53m"), "selected row draws the frame's top edge");
+assert.ok(selectedFrame.includes("\x1b[4m"), "selected row draws the frame's bottom edge");
+assert.ok(!selectedFrame.includes("\x1b[7m"), "selection no longer relies on inverse video");
 
 const longTitle = renderSidebar(
   { ...state, groups: groupSessions([session({ id: "9", title: "x".repeat(200) })], "/proj/a", new Set(), true) },
@@ -156,7 +159,12 @@ assert.ok(wide.some((l) => /\d{1,2}:\d{2}/.test(l)), "time column appears at 30 
 assert.ok(wide.some((l) => l.includes("│")), "guide column appears at 30 columns");
 assert.ok(wide[0].includes("1项目·3会话"), "full counts at 30 columns");
 assert.ok(wide.some((l) => l.includes("●")), "current session is marked with ●");
-assert.ok(wide.some((l) => l.includes("▌")), "current project is marked with ▌");
+// The selection frame takes the bar's column while the cursor sits on the
+// folder row, so check the marker with the cursor on a session instead.
+assert.ok(
+  draw(30, 12, { selectedIndex: 1 }).some((l) => l.includes("▌")),
+  "current project is marked with ▌",
+);
 
 // Wider still: full date labels come back instead of the compact numeric form.
 const widest = draw(44);
@@ -224,14 +232,36 @@ assert.equal(
   "ordinary sessions are not drawn in the folder colour",
 );
 
-// Selection rules: only sessions invert, so "inverted = Enter switches here"
-// stays true and a folder heading can never be mistaken for a session.
+// Selection is a rectangular frame: an overline top edge, an underline bottom
+// edge and half-width side bars, all inside the row itself. It reads the same on
+// any terminal theme and never fights the colours inside the row.
 const folderSelected = folderOf(rawLines(30, { selectedIndex: 0 }));
-assert.ok(!folderSelected.startsWith("\x1b[7m"), "selected folder row is not fully inverted");
-assert.ok(folderSelected.includes("\x1b[4m"), "selected folder label is underlined instead");
 assert.ok(
-  sessionOf(rawLines(30, { selectedIndex: 1 }), "今天的会话").startsWith("\x1b[7m"),
-  "selected session row is inverted",
+  folderSelected.includes("▏") && folderSelected.includes("▕"),
+  "folder selection draws the side bars",
+);
+assert.ok(folderSelected.includes("\x1b[53m"), "folder selection draws the top edge");
+assert.ok(folderSelected.includes("\x1b[94m"), "folder frame keeps the folder colour");
+assert.ok(!folderSelected.includes("\x1b[7m"), "folder selection does not invert");
+
+const sessionSelected = sessionOf(rawLines(30, { selectedIndex: 1 }), "今天的会话");
+assert.ok(
+  sessionSelected.includes("▏") && sessionSelected.includes("▕"),
+  "session selection draws the side bars",
+);
+assert.ok(sessionSelected.includes("\x1b[53m"), "session selection draws the top edge");
+assert.ok(sessionSelected.includes("\x1b[96m"), "the current session keeps its cyan frame");
+assert.ok(!sessionSelected.includes("\x1b[7m"), "session selection does not invert");
+assert.ok(
+  !sessionSelected.slice(sessionSelected.lastIndexOf("▕")).includes("\x1b[53m"),
+  "frame attributes do not leak past the right bar",
+);
+
+// The frame belongs to the cursor: none is drawn while pi owns the keyboard.
+assert.equal(
+  rawLines(30, { focused: false }).filter((l) => l.includes("\x1b[53m")).length,
+  0,
+  "no frame while the sidebar is unfocused",
 );
 
 // --- shiftRight transform (re-implemented here to test the regex logic) ----
