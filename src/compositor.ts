@@ -210,9 +210,10 @@ export class SessionSidebarCompositor {
   private shiftRight(data: string): string {
     const w = this.reservedWidth;
     const shift = `\x1b[${w}C`;
+    const hideCursor = this.getState().focused;
     return data.replace(
-      /(\x1b\[\?2026[hl])|(\x1b\[2J)|(\x1b\[(\d+);(\d+)H)|(\x1b\[H)|(\x1b\[(\d+)G)|(\x1b\[2K)|(\r\n)|(\r(?!\n))/g,
-      (match, sync, clear, cup, row, col, home, cha, chaCol, el, crlf, cr) => {
+      /(\x1b\[\?2026[hl])|(\x1b\[2J)|(\x1b\[(\d+);(\d+)H)|(\x1b\[H)|(\x1b\[(\d+)G)|(\x1b\[2K)|(\r\n)|(\r(?!\n))|(\x1b\[\?25[hl])/g,
+      (match, sync, clear, cup, row, col, home, cha, chaCol, el, crlf, cr, cursor) => {
         if (sync !== undefined) return ""; // strip pi's sync markers
         if (clear !== undefined) return match; // keep full clear (we repaint after)
         if (cup !== undefined) return `\x1b[${row};${Number(col) + w}H`;
@@ -221,6 +222,9 @@ export class SessionSidebarCompositor {
         if (el !== undefined) return "\x1b[0K"; // erase only to end of line
         if (crlf !== undefined) return match + shift;
         if (cr !== undefined) return match + shift;
+        // While the sidebar owns the keyboard, pi's main pane is unfocused, so
+        // its text cursor must not be shown.
+        if (cursor !== undefined) return hideCursor ? "\x1b[?25l" : match;
         return match;
       },
     );
@@ -247,7 +251,7 @@ export class SessionSidebarCompositor {
 
     const state = this.getState();
     const { lines } = renderSidebar(state, contentWidth, rawRows);
-    // Separator doubles as a mode indicator: accent color while navigating.
+    // Separator doubles as a focus indicator: accent color while focused.
     const separator = state.focused ? `${FG_CYAN}│${RESET}` : `${DIM}│${RESET}`;
 
     const formatted: string[] = [];

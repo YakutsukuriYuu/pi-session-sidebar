@@ -1,7 +1,16 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { clampWidth, loadConfig, saveConfig } from "./src/config.ts";
+import type { KeyId } from "@earendil-works/pi-tui";
+import {
+  clampWidth,
+  loadConfig,
+  saveConfig,
+  setPendingRefocus,
+  takePendingRefocus,
+  DEFAULT_FOCUS_KEY,
+} from "./src/config.ts";
 import { SessionSidebarCompositor } from "./src/compositor.ts";
+import { decodeSidebarKey } from "./src/keys.ts";
 import {
   filterSessions,
   flattenRows,
@@ -14,13 +23,7 @@ import {
 /** Minimum terminal width for the sidebar; below this it auto-collapses. */
 const MIN_RAW_COLUMNS = 100;
 
-/**
- * Nav-mode actions (switch/new/rename) need an ExtensionCommandContext, which
- * pi only hands to command handlers. So nav-mode keypresses are translated
- * into synthetic command input ("/session-sidebar switch <id>\r") via the
- * onTerminalInput transform channel — pi then dispatches the command with a
- * fresh, valid command context.
- */
+/** Our own command, used to reach a command context (see submitCommand). */
 const CMD = "/session-sidebar";
 
 export default function (pi: ExtensionAPI) {
@@ -29,9 +32,16 @@ export default function (pi: ExtensionAPI) {
   // --- Mutable state -------------------------------------------------------
   let allSessions: SessionListEntry[] = [];
   let loading = false;
+  /** Filter text; non-null means the search box is live (always live while focused). */
   let searchQuery: string | null = null;
-  let navMode = false; // sidebar has keyboard focus
+  /**
+   * Focus owner. True = the sidebar owns the keyboard and pi's main pane
+   * receives nothing. False = pi behaves exactly like stock pi.
+   */
+  let focused = false;
   let selectedIndex = 0;
+  /** Cleared whenever the user moves the selection themselves. */
+  let selectionPinnedToCurrent = true;
   const collapsedCwds = new Set<string>();
   let currentCwd = "";
   let currentSessionFile: string | undefined;
@@ -57,7 +67,7 @@ export default function (pi: ExtensionAPI) {
       currentSessionFile,
       currentCwd,
       loading,
-      focused: navMode,
+      focused,
     };
   }
 
@@ -104,6 +114,16 @@ export default function (pi: ExtensionAPI) {
     }, 16);
   }
 
+  /** Ask pi for a full render (needed when the cursor visibility changes). */
+  function requestPiRender(): void {
+    const tui = tuiRef as { requestRender?: () => void } | null;
+    try {
+      tui?.requestRender?.();
+    } catch {
+      // ignore
+    }
+  }
+
   function installCompositor(): void {
     compositor?.dispose();
     compositor = null;
@@ -140,6 +160,7 @@ export default function (pi: ExtensionAPI) {
     } finally {
       loading = false;
       refreshRunning = false;
+      if (selectionPinnedToCurrent) selectCurrentSession();
       clampSelection();
       schedulePaint();
       if (refreshQueued) {
@@ -149,177 +170,180 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // --- Nav mode ------------------------------------------------------------------
-  function enterNavMode(): void {
-    if (navMode) return;
-    if (!compositor || !compositor.isActive()) {
-      currentCtx?.ui.notify("终端太窄，会话侧栏已自动隐藏，无法进入导航", "warning");
+  // --- Focus model ------------------------------------------------------------------
+  function canFocus(): boolean {
+    return Boolean(compositor && compositor.isActive());
+  }
+
+  function enterFocus(): void {
+    if (focused) return;
+    if (!canFocus()) {
+      currentCtx?.ui.notify("终端太窄，会话侧栏已自动隐藏，无法聚焦", "warning");
       return;
     }
-    navMode = true;
+    focused = true;
+    searchQuery = "";
+    selectionPinnedToCurrent = true;
     selectCurrentSession();
     currentCtx?.ui.setStatus(
       "session-sidebar",
-      "会话导航: ↑↓ 移动 · Enter 切换 · ←→ 折叠 · n 新建 · r 重命名 · / 搜索 · Esc 退出",
+      "侧栏焦点 · 输入即搜索 · ↑↓ 选择 · Enter 切走 · ⇧Enter 留下 · ^N 新建 · ^R 重命名 · Esc 返回",
     );
+    requestPiRender();
     schedulePaint();
   }
 
-  function exitNavMode(): void {
-    if (!navMode) return;
-    navMode = false;
+  function exitFocus(): void {
+    if (!focused) return;
+    focused = false;
     searchQuery = null;
     currentCtx?.ui.setStatus("session-sidebar", undefined);
+    requestPiRender();
     schedulePaint();
   }
 
   /**
-   * Inject a synthetic extension command into pi's input pipeline.
-   * The command is dispatched with a fresh ExtensionCommandContext, which is
-   * the only context that carries switchSession/newSession.
+   * Run one of our own commands.
    *
-   * NOTE: pi-tui drops `data` when `consume` is also true (consume returns
-   * early in the listener loop), so the transform must return ONLY `data`.
+   * switchSession/newSession only exist on ExtensionCommandContext, which pi
+   * hands to command handlers. So the command is placed in the editor and
+   * submitted with a synthetic Enter: pi then dispatches it with a fresh
+   * command context. Note that pi's editor treats a "\r" inside a longer text
+   * chunk as a literal newline, so the text and the Enter must be separate.
    */
-  function injectCommand(sub: string): { consume?: boolean; data?: string } {
-    // A non-empty editor draft would corrupt the injected command (the text
-    // would be appended to the draft), so refuse instead.
+  function submitCommand(
+    sub: string,
+    mode: "unfocus" | "refocus" | "stay",
+  ): { consume?: boolean; data?: string } {
+    // The command is typed into the editor, so a draft would corrupt it.
+    let draft = "";
     try {
-      const draft = currentCtx?.ui.getEditorText();
-      if (draft && draft.trim()) {
-        currentCtx?.ui.notify("输入框里有未发送的内容，请先处理后再操作会话", "warning");
-        return { consume: true };
-      }
+      draft = currentCtx?.ui.getEditorText() ?? "";
     } catch {
-      // getEditorText unavailable — proceed anyway.
+      draft = "";
     }
-    exitNavMode();
-    return { data: `${CMD} ${sub}\r` };
+    if (draft.trim()) {
+      currentCtx?.ui.notify("输入框里有未发送的内容，操作已取消", "warning");
+      return { consume: true };
+    }
+
+    if (mode === "unfocus") {
+      setPendingRefocus(false);
+      exitFocus();
+    } else if (mode === "refocus") {
+      // A switch reloads the extension, so remember to re-focus afterwards.
+      setPendingRefocus(true);
+    }
+
+    currentCtx?.ui.setEditorText(`${CMD} ${sub}`);
+    return { data: "\r" };
   }
 
-  function toggleGroupAtSelection(): void {
+  function moveSelection(delta: number): void {
+    const state = buildState();
+    const max = Math.max(0, state.flatRows.length - 1);
+    const next = Math.min(max, Math.max(0, selectedIndex + delta));
+    if (next !== selectedIndex) {
+      selectionPinnedToCurrent = false;
+      selectedIndex = next;
+      schedulePaint();
+    }
+  }
+
+  function toggleGroupCollapsed(cwd: string | undefined): void {
+    if (!cwd) return;
+    if (collapsedCwds.has(cwd)) collapsedCwds.delete(cwd);
+    else collapsedCwds.add(cwd);
+    selectionPinnedToCurrent = false;
+    clampSelection();
+    schedulePaint();
+  }
+
+  function collapseOrExpandSelected(expand: boolean): void {
     const target = currentRow();
     if (!target || target.row.kind !== "group") return;
     const state = buildState();
     const cwd = state.groups[target.row.groupIndex]?.cwd;
     if (!cwd) return;
-    if (collapsedCwds.has(cwd)) collapsedCwds.delete(cwd);
-    else collapsedCwds.add(cwd);
-    clampSelection();
-    schedulePaint();
+    if (expand && !collapsedCwds.has(cwd)) return;
+    if (!expand && collapsedCwds.has(cwd)) return;
+    toggleGroupCollapsed(cwd);
   }
 
-  // --- Raw keyboard input (nav mode) ---------------------------------------------
+  // --- Raw keyboard input (focused sidebar only) ---------------------------------
   function handleInput(data: string): { consume?: boolean; data?: string } | undefined {
-    if (!navMode) return undefined;
+    // Not focused: pi owns the keyboard, this extension stays out of the way.
+    if (!focused) return undefined;
 
-    // Search input mode: capture printable characters.
-    if (searchQuery !== null) {
-      if (data === "\x1b") {
-        searchQuery = null;
+    const action = decodeSidebarKey(data, config.focusKey);
+    switch (action.type) {
+      case "exit":
+        exitFocus();
+        return { consume: true };
+
+      case "up":
+        moveSelection(-1);
+        return { consume: true };
+      case "down":
+        moveSelection(1);
+        return { consume: true };
+      case "left":
+        collapseOrExpandSelected(false);
+        return { consume: true };
+      case "right":
+        collapseOrExpandSelected(true);
+        return { consume: true };
+
+      case "switch": {
+        const target = currentRow();
+        if (!target?.session) return { consume: true };
+        if (target.session.path === currentSessionFile) {
+          if (!action.keepFocus) exitFocus();
+          return { consume: true };
+        }
+        return submitCommand(
+          `switch ${target.session.id}`,
+          action.keepFocus ? "refocus" : "unfocus",
+        );
+      }
+
+      case "new":
+        return submitCommand("new", "unfocus");
+
+      case "rename": {
+        const target = currentRow();
+        if (!target?.session) return { consume: true };
+        // Renaming does not replace the session, so focus simply stays here.
+        return submitCommand(`rename ${target.session.id}`, "stay");
+      }
+
+      case "backspace":
+        searchQuery = (searchQuery ?? "").slice(0, -1);
+        selectionPinnedToCurrent = true;
         clampSelection();
         selectCurrentSession();
         schedulePaint();
         return { consume: true };
-      }
-      if (data === "\r" || data === "\n") {
-        // Keep the filter, leave search-input mode (stay in nav mode).
-        searchQuery = searchQuery.trim() ? searchQuery : null;
+
+      case "clearSearch":
+        searchQuery = "";
+        selectionPinnedToCurrent = true;
+        selectCurrentSession();
         schedulePaint();
         return { consume: true };
-      }
-      if (data === "\x7f" || data === "\b") {
-        searchQuery = searchQuery.slice(0, -1);
+
+      case "type":
+        searchQuery = (searchQuery ?? "") + action.text;
+        selectedIndex = 0;
+        selectionPinnedToCurrent = false;
         clampSelection();
         schedulePaint();
         return { consume: true };
-      }
-      if (data.startsWith("\x1b") || data.charCodeAt(0) < 32) {
-        return { consume: true };
-      }
-      searchQuery += data;
-      selectedIndex = 0;
-      clampSelection();
-      schedulePaint();
-      return { consume: true };
-    }
 
-    switch (data) {
-      case "\x1b": // Esc
-        exitNavMode();
-        return { consume: true };
-      case "\x1b[A": // up
-      case "\x1bOA":
-        selectedIndex = Math.max(0, selectedIndex - 1);
-        schedulePaint();
-        return { consume: true };
-      case "\x1b[B": // down
-      case "\x1bOB": {
-        const state = buildState();
-        selectedIndex = Math.min(Math.max(0, state.flatRows.length - 1), selectedIndex + 1);
-        schedulePaint();
-        return { consume: true };
-      }
-      case "\x1b[D": // left → collapse
-      case "\x1bOD": {
-        const target = currentRow();
-        if (target?.row.kind === "group") toggleGroupAtSelection();
-        return { consume: true };
-      }
-      case "\x1b[C": // right → expand
-      case "\x1bOC": {
-        const target = currentRow();
-        if (target?.row.kind === "group") {
-          const state = buildState();
-          const cwd = state.groups[target.row.groupIndex]?.cwd;
-          if (cwd && collapsedCwds.has(cwd)) toggleGroupAtSelection();
-        }
-        return { consume: true };
-      }
-      case "\r":
-      case "\n": {
-        const target = currentRow();
-        if (target?.row.kind === "group") {
-          toggleGroupAtSelection();
-          return { consume: true };
-        }
-        if (target?.session) {
-          if (target.session.path === currentSessionFile) {
-            exitNavMode();
-            return { consume: true };
-          }
-          return injectCommand(`switch ${target.session.id}`);
-        }
-        return { consume: true };
-      }
-      case "n":
-      case "N":
-        return injectCommand("new");
-      case "r":
-      case "R": {
-        const target = currentRow();
-        if (target?.session) return injectCommand(`rename ${target.session.id}`);
-        return { consume: true };
-      }
-      case "/":
-        searchQuery = "";
-        selectedIndex = 0;
-        schedulePaint();
-        return { consume: true };
-      case "g":
-        selectedIndex = 0;
-        schedulePaint();
-        return { consume: true };
-      case "G": {
-        const state = buildState();
-        selectedIndex = Math.max(0, state.flatRows.length - 1);
-        schedulePaint();
-        return { consume: true };
-      }
+      case "ignore":
       default:
-        // Pass through everything else (typing, Shift+Enter, Ctrl+C, …) so a
-        // forgotten nav mode never hijacks normal editing.
-        return undefined;
+        // True focus isolation: unbound keys are swallowed, never forwarded.
+        return { consume: true };
     }
   }
 
@@ -328,7 +352,7 @@ export default function (pi: ExtensionAPI) {
     currentCtx = ctx;
     currentCwd = ctx.cwd;
     currentSessionFile = ctx.sessionManager.getSessionFile();
-    navMode = false;
+    focused = false;
     searchQuery = null;
 
     if (!ctx.hasUI) return;
@@ -344,12 +368,12 @@ export default function (pi: ExtensionAPI) {
         tuiRef = tui;
         installCompositor();
         // When the terminal shrinks below the minimum width the sidebar hides
-        // itself; leave nav mode so keys are never swallowed invisibly.
+        // itself; leave focus so keys are never swallowed invisibly.
         if (compositor) {
           compositor.onAutoHide = () => {
-            if (navMode) {
-              exitNavMode();
-              currentCtx?.ui.notify("窗口过窄，会话导航已退出", "info");
+            if (focused) {
+              exitFocus();
+              currentCtx?.ui.notify("窗口过窄，侧栏焦点已释放", "info");
             }
           };
         }
@@ -368,7 +392,12 @@ export default function (pi: ExtensionAPI) {
       { placement: "belowEditor" },
     );
 
-    void refreshSessions();
+    // A "switch and stay" reloaded the extension; re-take focus.
+    const refocus = takePendingRefocus();
+    if (refocus) enterFocus();
+
+    await refreshSessions();
+    if (focused) selectCurrentSession();
   });
 
   pi.on("session_shutdown", async () => {
@@ -378,7 +407,7 @@ export default function (pi: ExtensionAPI) {
     compositor = null;
     tuiRef = null;
     currentCtx = null;
-    navMode = false;
+    focused = false;
     searchQuery = null;
   });
 
@@ -397,13 +426,14 @@ export default function (pi: ExtensionAPI) {
 
   // --- Commands ------------------------------------------------------------------
   pi.registerCommand("session-sidebar", {
-    description: "会话侧栏: on | off | width <n> | all | current | refresh",
+    description: "会话侧栏: nav | on | off | width <n> | all | current | refresh",
     handler: async (args, ctx) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       switch (sub) {
         case "nav":
-          if (navMode) exitNavMode();
-          else enterNavMode();
+        case "focus":
+          if (focused) exitFocus();
+          else enterFocus();
           break;
         case "on":
           config = { ...config, enabled: true };
@@ -414,6 +444,7 @@ export default function (pi: ExtensionAPI) {
         case "off":
           config = { ...config, enabled: false };
           saveConfig(config);
+          exitFocus();
           compositor?.dispose();
           compositor = null;
           ctx.ui.notify("会话侧栏已关闭（调整窗口大小后恢复全宽）", "info");
@@ -446,17 +477,25 @@ export default function (pi: ExtensionAPI) {
           void refreshSessions();
           ctx.ui.notify("会话列表已刷新", "info");
           break;
-        // --- Internal subcommands (used by nav-mode key injection) -------------
+        // --- Internal subcommands (used by focused-sidebar key handling) --------
         case "switch": {
           const id = rest[0];
           const session = allSessions.find((s) => s.id === id);
           if (!session) {
+            // Do not leave a "refocus" marker behind for a switch that never ran.
+            setPendingRefocus(false);
             ctx.ui.notify("找不到该会话，请刷新列表", "warning");
             break;
           }
-          if (session.path === currentSessionFile) break;
+          if (session.path === currentSessionFile) {
+            setPendingRefocus(false);
+            break;
+          }
           const result = await ctx.switchSession(session.path);
-          if (result.cancelled) ctx.ui.notify("会话切换被取消", "warning");
+          if (result.cancelled) {
+            setPendingRefocus(false);
+            ctx.ui.notify("会话切换被取消", "warning");
+          }
           break;
         }
         case "new":
@@ -478,7 +517,7 @@ export default function (pi: ExtensionAPI) {
         }
         default:
           ctx.ui.notify(
-            "用法: /session-sidebar nav|on|off|width <n>|all|current|refresh —— Ctrl+Shift+H 进入会话导航",
+            `用法: /session-sidebar nav|on|off|width <n>|all|current|refresh —— 快捷键 ${config.focusKey} 聚焦侧栏`,
             "info",
           );
       }
@@ -486,17 +525,20 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // --- Shortcut: toggle nav mode --------------------------------------------------
-  pi.registerShortcut("ctrl+shift+h", {
-    description: "进入/退出会话侧栏导航（终端不支持时用 /session-sidebar nav）",
+  // --- Shortcut: hand focus to the sidebar (and back) -------------------------------
+  pi.registerShortcut(config.focusKey as KeyId, {
+    description: "聚焦/离开会话侧栏（终端不支持该组合键时用 /session-sidebar nav）",
     handler: async (ctx) => {
       currentCtx = ctx;
       if (!config.enabled) {
         ctx.ui.notify("会话侧栏已关闭，使用 /session-sidebar on 开启", "warning");
         return;
       }
-      if (navMode) exitNavMode();
-      else enterNavMode();
+      if (focused) exitFocus();
+      else enterFocus();
     },
   });
 }
+
+/** Re-export for tests/tools that want the default focus key. */
+export { DEFAULT_FOCUS_KEY };

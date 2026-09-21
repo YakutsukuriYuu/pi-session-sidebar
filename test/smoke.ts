@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { filterSessions, flattenRows, groupSessions, projectLabel } from "../src/model.ts";
 import type { SessionListEntry } from "../src/model.ts";
 import { renderSidebar, formatDate, clip } from "../src/render.ts";
-import { clampWidth } from "../src/config.ts";
+import { clampWidth, setPendingRefocus, takePendingRefocus } from "../src/config.ts";
+import { decodeSidebarKey } from "../src/keys.ts";
 
 function session(partial: Partial<SessionListEntry>): SessionListEntry {
   return {
@@ -167,5 +168,46 @@ assert.ok(narrowFrame.includes("\r\nhello"), "narrow: no shift injected");
 assert.ok(narrowFrame.includes("\x1b[2K"), "narrow: erase untouched");
 assert.ok(autoHidden, "auto-hide callback fired");
 comp2.dispose();
+
+// --- sidebar key decoding ---------------------------------------------------
+const FOCUS_KEY = "ctrl+shift+h";
+const keyCase = (data: string): string => {
+  const a = decodeSidebarKey(data, FOCUS_KEY);
+  return a.type === "switch" ? `switch:${a.keepFocus}` : a.type;
+};
+
+assert.equal(keyCase("\x1b"), "exit", "escape leaves focus");
+assert.equal(keyCase("\x1b[A"), "up", "arrow up");
+assert.equal(keyCase("\x1b[B"), "down", "arrow down");
+assert.equal(keyCase("\x1b[C"), "right", "arrow right expands");
+assert.equal(keyCase("\x1b[D"), "left", "arrow left collapses");
+assert.equal(keyCase("\x1b[1;1A"), "up", "kitty arrow up");
+assert.equal(keyCase("\r"), "switch:false", "Enter switches and hands focus back");
+assert.equal(
+  keyCase("\x1b[13;2u"),
+  "switch:true",
+  "Shift+Enter switches and keeps sidebar focus",
+);
+assert.equal(keyCase("\x0e"), "new", "Ctrl+N creates a session");
+assert.equal(keyCase("\x12"), "rename", "Ctrl+R renames");
+assert.equal(keyCase("\x15"), "clearSearch", "Ctrl+U clears the query");
+assert.equal(keyCase("\x7f"), "backspace", "backspace edits the query");
+assert.equal(keyCase("a"), "type", "plain letters feed the search box");
+assert.equal(keyCase("中"), "type", "wide characters feed the search box");
+assert.equal(keyCase("\x03"), "ignore", "Ctrl+C is swallowed while focused");
+assert.equal(keyCase("\x1b[9;5u"), "ignore", "unbound keys are swallowed");
+
+// The focused sidebar must never leak keys to pi's editor.
+for (const raw of ["\x03", "\x1b[9;5u", "\x1bZ", "\x1b[3~"]) {
+  const action = decodeSidebarKey(raw, FOCUS_KEY);
+  assert.ok(action.type === "ignore" || action.type === "type", `consumed: ${JSON.stringify(raw)}`);
+}
+
+// --- focus marker round-trip ("switch but stay in the sidebar") ---------------
+setPendingRefocus(true);
+assert.equal(takePendingRefocus(), true, "pending refocus survives a reload");
+assert.equal(takePendingRefocus(), false, "marker is consumed exactly once");
+setPendingRefocus(false); // leave no stray state behind
+assert.equal(takePendingRefocus(), false, "cleared marker stays cleared");
 
 console.log("✓ all smoke tests passed");
