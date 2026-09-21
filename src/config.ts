@@ -51,17 +51,16 @@ export const DEFAULT_KEYS: SidebarKeyConfig = {
   wider: "ctrl+shift+=",
   narrower: "ctrl+shift+-",
   // Shift+arrows are unbound in pi, pi-tui's editor and the fullscreen viewport
-  // (which uses ctrl+shift+arrows for prompt jumps).
-  collapseAll: "shift+left",
-  expandAll: "shift+right",
+  // (which uses ctrl+shift+arrows), so they are free for pane switching.
+  collapseAll: "alt+[",
+  expandAll: "alt+]",
   prevFolder: "shift+up",
   nextFolder: "shift+down",
   // Directional focus: the arrows point at the pane to move to, like pane
-  // switching in tmux. Ctrl+arrows are the *secondary* binding for the editor's
-  // word-wise cursor movement (alt+arrows come first on macOS, and alt+b/f are
-  // also available), so taking them costs very little.
-  focusLeft: "ctrl+left",
-  focusRight: "ctrl+right",
+  // switching in tmux. Shift+arrows reach the terminal reliably; macOS keeps
+  // ctrl+arrows for Mission Control, which is why they are not used here.
+  focusLeft: "shift+left",
+  focusRight: "shift+right",
 };
 
 function configPath(): string {

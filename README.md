@@ -66,7 +66,7 @@ ChatGPT 风格的左侧会话导航栏，直接嵌入 [Pi](https://pi.dev) 的�
 
 - **左侧固定会话栏**：按项目分组显示所有 Pi 会话；文件夹用蓝色图标+蓝色标签，当前项目额外带 `▌` 竖条，当前会话用青色 `●`
 - **tmux 式焦点模型**：`Ctrl+H`（终端支持时）或 `Ctrl+Shift+H` 把键盘焦点交给侧栏，再按一次或 `Esc` 归还给 Pi
-- **方向性切换**：`Ctrl+←` 把焦点移到侧栏、`Ctrl+→` 移回 Pi（箭头指向要去的窗格）
+- **方向性切换**：`Shift+←` 把焦点移到侧栏、`Shift+→` 移回 Pi（箭头指向要去的窗格）
 - **输入即搜索**：侧栏持有焦点时直接打字就是过滤（标题、首条消息、项目路径），底部实时显示匹配数
 - **切换会话**：`Enter` 切换并把焦点交还右侧；`Shift+Enter` 切换但**焦点留在侧栏**，
   可以连续浏览多个会话
@@ -104,20 +104,21 @@ pi -e /path/to/pi-session-sidebar/index.ts
 | 直接打字 | 搜索（`Backspace` 删除，`Ctrl+U` 清空） |
 | `↑` / `↓` | 移动选择 |
 | `←` / `→` | 折叠 / 展开**当前**项目（`Tab` / `Shift+Tab` 同义） |
-| `Shift+←` / `Shift+→` | **全部折叠** / **全部展开**所有项目（当前项目也折叠） |
+| `Alt+[` / `Alt+]` | **全部折叠** / **全部展开**所有项目（当前项目也折叠） |
 | `Shift+↑` / `Shift+↓` | 跳到**上一个 / 下一个项目**（到首尾停住，不循环） |
+| `Shift+→` | 焦点交还 Pi（方向性切换） |
 | `Enter` | 切换到所选会话，**焦点交还右侧** |
 | `Shift+Enter` | 切换到所选会话，**焦点留在侧栏** |
 | `Ctrl+N` | 新建会话 |
 | `Ctrl+R` | 重命名当前会话 |
 | `Esc` 或聚焦键 | 焦点交还右侧 |
-| `Ctrl+→` | 焦点交还右侧（方向性切换） |
+
 
 ### 侧栏显示 / 隐藏与宽度（任意时刻可用，不要求聚焦）
 
 | 按键 | 作用 |
 | --- | --- |
-| `Ctrl+←` | 焦点**移到侧栏**（任意时刻可用，不要求已聚焦） |
+| `Shift+←` | 焦点**移到侧栏**（任意时刻可用，不要求已聚焦；已聚焦时无动作） |
 | `Ctrl+Shift+B` | 显示 / 隐藏侧栏面板 |
 | `Ctrl+Shift+=`（即 `Ctrl+Shift++`） | 侧栏变宽 1 列 |
 | `Ctrl+Shift+-` | 侧栏变窄 1 列 |
@@ -143,12 +144,12 @@ pi -e /path/to/pi-session-sidebar/index.ts
     "toggle": "ctrl+shift+b",
     "wider": "ctrl+shift+=",
     "narrower": "ctrl+shift+-",
-    "collapseAll": "shift+left",
-    "expandAll": "shift+right",
+    "collapseAll": "alt+[",
+    "expandAll": "alt+]",
     "prevFolder": "shift+up",
     "nextFolder": "shift+down",
-    "focusLeft": "ctrl+left",
-    "focusRight": "ctrl+right"
+    "focusLeft": "shift+left",
+    "focusRight": "shift+right"
   }
 }
 ```
@@ -162,18 +163,20 @@ pi -e /path/to/pi-session-sidebar/index.ts
 | `keys.toggle` | 显示 / 隐藏侧栏面板 |
 | `keys.wider` | 侧栏变宽 1 列 |
 | `keys.narrower` | 侧栏变窄 1 列 |
-| `keys.collapseAll` | 全部折叠所有项目 |
-| `keys.expandAll` | 全部展开所有项目 |
+| `keys.collapseAll` | 全部折叠所有项目（默认 `Alt+[`） |
+| `keys.expandAll` | 全部展开所有项目（默认 `Alt+]`） |
 | `keys.prevFolder` | 跳到上一个项目 |
 | `keys.nextFolder` | 跳到下一个项目 |
-| `keys.focusLeft` | 焦点移到侧栏（默认 `Ctrl+←`） |
-| `keys.focusRight` | 焦点交还 Pi（默认 `Ctrl+→`） |
+| `keys.focusLeft` | 焦点移到侧栏（默认 `Shift+←`） |
+| `keys.focusRight` | 焦点交还 Pi（默认 `Shift+→`） |
 
-**关于 `Ctrl+←` / `Ctrl+→` 的代价**：编辑器里"按词移动光标"原本有三个绑定
-（`alt+←/→`、`ctrl+←/→`、`alt+b/f`），方向性切换占用了其中 `ctrl+←/→` 这一组，
-所以**按词移动仍有 `Option+←/→`（macOS 惯例）和 `alt+b/f` 可用**。另外插件在检测到
-pi 自己的浮层（`/tree`、`/resume` 选择器、模型选择器等）打开时会自动让路，不会抢掉
-`/tree` 里的折叠键。
+**为什么方向性切换用 `Shift+←/→`**：`Ctrl+←/→` 在 macOS 上被系统占用（调度中心的
+"移动一个空间"），按键根本送不到终端；编辑器里"按词移动"也用它（还占 `/tree` 的折叠）。
+`Shift+←/→` 在 pi、pi-tui 编辑器和全屏视口里都空闲，终端也能可靠上报。
+
+按下 `Shift+←` 进入侧栏后，`Shift+←` 本身不再有动作（没有更左的窗格），所以
+"全部折叠/展开"挪到了 `Alt+[` / `Alt+]`。插件在检测到 pi 自己的浮层（`/tree`、
+`/resume` 选择器、模型选择器等）打开时会自动让路。
 
 **字段可以写多个键**（逗号分隔），这样新键更省力、旧键也不丢：
 

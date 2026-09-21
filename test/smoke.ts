@@ -527,13 +527,14 @@ assert.equal(
 // --- project bulk keys and folder jumps --------------------------------------
 // matchesKey separates modified keys exactly, so the shift variants never
 // collide with the plain arrows that move the cursor and fold one project.
-assert.equal(keyCase("\x1b[1;2D"), "collapseAll", "Shift+Left collapses every project");
-assert.equal(keyCase("\x1b[1;2C"), "expandAll", "Shift+Right expands every project");
+assert.equal(keyCase("\x1b["), "collapseAll", "Alt+[ collapses every project");
+assert.equal(keyCase("\x1b]"), "expandAll", "Alt+] expands every project");
 assert.equal(keyCase("\x1b[1;2A"), "prevFolder", "Shift+Up jumps to the previous project");
 assert.equal(keyCase("\x1b[1;2B"), "nextFolder", "Shift+Down jumps to the next project");
-assert.equal(keyCase("\x1b[1;5D"), "focusSidebar", "Ctrl+Left reaches the sidebar");
-assert.equal(keyCase("\x1b[1;5C"), "focusEditor", "Ctrl+Right returns to pi");
-assert.equal(keyCase("\x1b[D"), "left", "Ctrl+Left does not shadow plain Left");
+assert.equal(keyCase("\x1b[1;2D"), "focusSidebar", "Shift+Left reaches the sidebar");
+assert.equal(keyCase("\x1b[1;2C"), "focusEditor", "Shift+Right returns to pi");
+assert.equal(keyCase("\x1b[D"), "left", "plain Left still folds the current project only");
+assert.equal(keyCase("\x1b[A"), "up", "plain Up still moves one row");
 assert.equal(keyCase("\x1b[A"), "up", "plain Up still moves one row");
 
 // Every shortcut can be replaced from the config file.
@@ -564,9 +565,14 @@ assert.equal(customCase("\x1bn"), "nextFolder", "custom next-project key works")
 assert.equal(customCase("\x1bl"), "focusSidebar", "custom focus-left key works");
 assert.equal(customCase("\x1br"), "focusEditor", "custom focus-right key works");
 assert.equal(
-  customCase("\x1b[1;5D"),
+  customCase("\x1b[1;2D"),
   "ignore",
   "the default focus-left key is unbound once replaced",
+);
+assert.equal(
+  customCase("\x1b["),
+  "ignore",
+  "the default collapse-all key is unbound once replaced",
 );
 assert.equal(
   customCase("\x1b[1;2D"),
