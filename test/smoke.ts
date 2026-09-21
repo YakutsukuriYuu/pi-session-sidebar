@@ -101,6 +101,95 @@ assert.equal(formatDate(new Date(2024, 11, 31), now), "2024/12/31");
 assert.equal(clip("hello", 10), "hello");
 assert.ok(clip("hello world, this is long", 8).length <= 8 + 10); // ANSI adds bytes
 
+// --- sidebar layout: header, time budget, guide column, status line ---------
+const plainLine = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, "");
+const clock = new Date();
+const uiSessions = [
+  session({
+    id: "t1",
+    cwd: "/proj/p",
+    title: "今天的会话",
+    modified: new Date(clock.getTime() - 3_600_000),
+  }),
+  session({
+    id: "y1",
+    cwd: "/proj/p",
+    title: "今年的会话",
+    // A different month guarantees "this year, not today".
+    modified: new Date(clock.getFullYear(), (clock.getMonth() + 6) % 12, 15, 9, 30),
+  }),
+  session({
+    id: "o1",
+    cwd: "/proj/p",
+    title: "去年的会话",
+    modified: new Date(clock.getFullYear() - 1, 5, 15, 8, 0),
+  }),
+];
+const uiGroups = groupSessions(uiSessions, "/proj/p", new Set(), true);
+const uiFlat = flattenRows(uiGroups);
+const uiState = {
+  width: 30,
+  searchQuery: null,
+  groups: uiGroups,
+  flatRows: uiFlat,
+  selectedIndex: 0,
+  currentSessionFile: uiSessions[0].path,
+  currentCwd: "/proj/p",
+  loading: false,
+  focused: true,
+  totalSessions: uiSessions.length,
+  focusKey: "ctrl+shift+h",
+};
+const draw = (width: number, rows = 12, extra: Record<string, unknown> = {}) =>
+  renderSidebar({ ...uiState, width, ...extra }, width, rows).lines.map(plainLine);
+
+// Narrow: the time and guide columns are dropped so titles keep their room.
+const narrow = draw(24);
+assert.ok(!narrow.some((l) => /\d{1,2}:\d{2}|\d+\/\d+/.test(l)), "no time column at 24 columns");
+assert.ok(!narrow.some((l) => l.includes("│")), "no guide column at 24 columns");
+assert.ok(narrow[0].includes("3会话"), "counts stay in the header when the long form does not fit");
+assert.ok(narrow[0].includes("Pi"), "header always names the panel");
+
+// Wide enough for a 5-column time budget: time and guide appear.
+const wide = draw(30);
+assert.ok(wide.some((l) => /\d{1,2}:\d{2}/.test(l)), "time column appears at 30 columns");
+assert.ok(wide.some((l) => l.includes("│")), "guide column appears at 30 columns");
+assert.ok(wide[0].includes("1项目·3会话"), "full counts at 30 columns");
+assert.ok(wide.some((l) => l.includes("●")), "current session is marked with ●");
+assert.ok(wide.some((l) => l.includes("▌")), "current project is marked with ▌");
+
+// Wider still: full date labels come back instead of the compact numeric form.
+const widest = draw(44);
+assert.ok(widest.some((l) => l.includes("月")), "full date labels at 44 columns");
+
+// One old session must not shift or remove the column for every other row.
+const withOldOnly = draw(30).filter((l) => l.includes("今天") || l.includes("今年"));
+assert.ok(withOldOnly.length === 2, "today and this-year rows are rendered");
+for (const line of widest.concat(wide, narrow)) {
+  assert.ok([...line].length <= 43, `row stays within the panel: ${JSON.stringify(line)}`);
+}
+
+// Status line: match count while searching, scroll hints when the list overflows.
+const searching = draw(30, 12, { searchQuery: "今年" });
+assert.ok(
+  searching[searching.length - 1].includes("3/3 匹配"),
+  "footer reports the match count while searching",
+);
+const manyGroups = groupSessions(
+  Array.from({ length: 20 }, (_, i) => session({ id: `m${i}`, cwd: "/proj/p", title: `会话 ${i}` })),
+  "/proj/p",
+  new Set(),
+  true,
+);
+const overflow = renderSidebar(
+  { ...uiState, groups: manyGroups, flatRows: flattenRows(manyGroups), selectedIndex: 10 },
+  30,
+  12,
+).lines.map(plainLine);
+const foot = overflow[overflow.length - 1];
+assert.ok(foot.includes("↑"), "footer hints at rows above the window");
+assert.ok(foot.includes("↓"), "footer hints at rows below the window");
+
 // --- shiftRight transform (re-implemented here to test the regex logic) ----
 // We exercise the real compositor transform via a minimal fake terminal.
 const { SessionSidebarCompositor } = await import("../src/compositor.ts");
@@ -241,7 +330,6 @@ assert.deepEqual(narrowSeen, ["\x1b[<0;40;10M"], "inactive sidebar leaves coordi
 inactiveComp.dispose();
 
 // --- sidebar key decoding ---------------------------------------------------
-const FOCUS_KEY = DEFAULT_KEYS.focus;
 const keyCase = (data: string): string => {
   const a = decodeSidebarKey(data, DEFAULT_KEYS);
   return a.type === "switch" ? `switch:${a.keepFocus}` : a.type;

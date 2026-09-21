@@ -28,6 +28,10 @@ export interface SidebarRenderState {
   loading: boolean;
   /** True when the sidebar has keyboard focus (nav mode). */
   focused: boolean;
+  /** Unfiltered session count, for the "3/7 匹配" footer. */
+  totalSessions?: number;
+  /** Configured focus shortcut, so the hint line shows the real key. */
+  focusKey?: string;
 }
 
 export interface FlatRow {

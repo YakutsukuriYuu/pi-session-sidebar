@@ -71,6 +71,8 @@ export default function (pi: ExtensionAPI) {
       currentCwd,
       loading,
       focused,
+      totalSessions: allSessions.length,
+      focusKey: config.keys.focus,
     };
   }
 
