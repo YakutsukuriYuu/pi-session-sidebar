@@ -65,7 +65,7 @@ ChatGPT 风格的左侧会话导航栏，直接嵌入 [Pi](https://pi.dev) 的�
 ## 功能
 
 - **左侧固定会话栏**：按项目分组显示所有 Pi 会话；文件夹用蓝色图标+蓝色标签，当前项目额外带 `▌` 竖条，当前会话用青色 `●`
-- **tmux 式焦点模型**：`Ctrl+Shift+H` 把键盘焦点交给侧栏，再按一次或 `Esc` 归还给 Pi
+- **tmux 式焦点模型**：`Ctrl+H`（终端支持时）或 `Ctrl+Shift+H` 把键盘焦点交给侧栏，再按一次或 `Esc` 归还给 Pi
 - **输入即搜索**：侧栏持有焦点时直接打字就是过滤（标题、首条消息、项目路径），底部实时显示匹配数
 - **切换会话**：`Enter` 切换并把焦点交还右侧；`Shift+Enter` 切换但**焦点留在侧栏**，
   可以连续浏览多个会话
@@ -102,7 +102,9 @@ pi -e /path/to/pi-session-sidebar/index.ts
 | --- | --- |
 | 直接打字 | 搜索（`Backspace` 删除，`Ctrl+U` 清空） |
 | `↑` / `↓` | 移动选择 |
-| `←` / `→` | 折叠 / 展开项目分组（`Tab` / `Shift+Tab` 同义） |
+| `←` / `→` | 折叠 / 展开**当前**项目（`Tab` / `Shift+Tab` 同义） |
+| `Shift+←` / `Shift+→` | **全部折叠** / **全部展开**所有项目（当前项目也折叠） |
+| `Shift+↑` / `Shift+↓` | 跳到**上一个 / 下一个项目**（到首尾停住，不循环） |
 | `Enter` | 切换到所选会话，**焦点交还右侧** |
 | `Shift+Enter` | 切换到所选会话，**焦点留在侧栏** |
 | `Ctrl+N` | 新建会话 |
@@ -134,10 +136,14 @@ pi -e /path/to/pi-session-sidebar/index.ts
   "width": 30,
   "showAllProjects": true,
   "keys": {
-    "focus": "ctrl+shift+h",
+    "focus": "ctrl+h, ctrl+shift+h",
     "toggle": "ctrl+shift+b",
     "wider": "ctrl+shift+=",
-    "narrower": "ctrl+shift+-"
+    "narrower": "ctrl+shift+-",
+    "collapseAll": "shift+left",
+    "expandAll": "shift+right",
+    "prevFolder": "shift+up",
+    "nextFolder": "shift+down"
   }
 }
 ```
@@ -147,15 +153,32 @@ pi -e /path/to/pi-session-sidebar/index.ts
 | `enabled` | 侧栏是否显示（默认 `true`） |
 | `width` | 侧栏宽度，20–60（默认 `30`） |
 | `showAllProjects` | `false` 时只显示当前项目的会话 |
-| `keys.focus` | 聚焦 / 离开侧栏 |
+| `keys.focus` | 聚焦 / 离开侧栏（**默认两个键**：`Ctrl+H` 与 `Ctrl+Shift+H`） |
 | `keys.toggle` | 显示 / 隐藏侧栏面板 |
 | `keys.wider` | 侧栏变宽 1 列 |
 | `keys.narrower` | 侧栏变窄 1 列 |
+| `keys.collapseAll` | 全部折叠所有项目 |
+| `keys.expandAll` | 全部展开所有项目 |
+| `keys.prevFolder` | 跳到上一个项目 |
+| `keys.nextFolder` | 跳到下一个项目 |
+
+**字段可以写多个键**（逗号分隔），这样新键更省力、旧键也不丢：
+
+```json
+"focus": "ctrl+h, ctrl+shift+h"
+```
+
+**关于 `Ctrl+H`**：它的传统字节是 `0x08`，**与退格键同码**。只有在终端启用了 kitty
+keyboard protocol（Ghostty / kitty / WezTerm / iTerm2 新版支持）时才能区分，所以：
+
+- 终端支持 → `Ctrl+H` 生效（比三键的 `Ctrl+Shift+H` 省力）
+- 终端不支持 → 插件**自动忽略** `Ctrl+H`（否则每按一次退格都会切换焦点），改用别名
+  `Ctrl+Shift+H`，并在启动后提示一次
 
 **自定义按键**：`keys` 里可以用任何 pi 能识别的键名，例如 `"alt+s"`、`"ctrl+shift+j"`、`"f5"`。注意事项：
 
 - **不要用 pi 或 pi-tui 已占用的键**（如 `ctrl+c`、`ctrl+d`、`ctrl+o`、`ctrl+l`、`ctrl+-`、`ctrl+enter`、方向键等）。侧栏会全局消费这些键，pi 就再也收不到它们了
-- 同一按键不要重复配置给两个动作：判定顺序是 **focus → toggle → wider → narrower**，先匹配中的生效
+- 同一按键不要重复配置给两个动作：判定顺序是 **focus → toggle → collapseAll/expandAll → prevFolder/nextFolder → wider/narrower**，先匹配中的生效
 - 键名写错或无法解析时**不会崩溃**，只是该动作失效（可用 `/session-sidebar` 无参执行查看当前生效键位）
 - `Ctrl+Shift++` 这类带 `+` 的组合无法直接写成键名，用 `=` 代替（插件已兼容终端上报 `+` 字符码的情况）
 - 旧的写法 `"focusKey": "..."` 仍然兼容（等价于 `keys.focus`），保存后会自动迁移成 `keys` 形式
@@ -226,7 +249,7 @@ Pi 的扩展 API 不提供"修改主布局"的正式接口，所以本插件采�
 - 终端宽度 < 100 列时自动隐藏，恢复后自动出现；自动隐藏时会同时释放焦点
 - 焦点快捷键需要终端支持 Kitty keyboard protocol 才能识别带 `shift` 的组合键
   （Ghostty、kitty、WezTerm、iTerm2 新版均支持）。如果按下无反应，说明终端把
-  `Ctrl+Shift+H` 上报成了退格等别的键，请改用 `/session-sidebar nav` 聚焦、
+  `Ctrl+H` / `Ctrl+Shift+H` 上报成了退格等别的键，请改用 `/session-sidebar nav` 聚焦、
   用 `Esc` 离开，或在配置里把 `focusKey` 改成你的终端能区分的组合键
 - 输入框里有未发送的草稿时，切换/新建/重命名会被拒绝（命令要借编辑器提交，
   避免污染草稿），请先发送或清空草稿

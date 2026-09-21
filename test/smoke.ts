@@ -14,7 +14,14 @@ import {
   DEFAULT_KEYS,
   type SidebarKeyConfig,
 } from "../src/config.ts";
-import { decodeSidebarKey, isInertKeyEvent, matchesConfiguredKey } from "../src/keys.ts";
+import {
+  decodeSidebarKey,
+  isInertKeyEvent,
+  matchesConfiguredKey,
+  matchesConfiguredKeys,
+  unusableConfiguredKeys,
+} from "../src/keys.ts";
+import { setKittyProtocolActive } from "@earendil-works/pi-tui";
 
 function session(partial: Partial<SessionListEntry>): SessionListEntry {
   return {
@@ -517,12 +524,26 @@ assert.equal(
   "default toggle key is Ctrl+Shift+B",
 );
 
+// --- project bulk keys and folder jumps --------------------------------------
+// matchesKey separates modified keys exactly, so the shift variants never
+// collide with the plain arrows that move the cursor and fold one project.
+assert.equal(keyCase("\x1b[1;2D"), "collapseAll", "Shift+Left collapses every project");
+assert.equal(keyCase("\x1b[1;2C"), "expandAll", "Shift+Right expands every project");
+assert.equal(keyCase("\x1b[1;2A"), "prevFolder", "Shift+Up jumps to the previous project");
+assert.equal(keyCase("\x1b[1;2B"), "nextFolder", "Shift+Down jumps to the next project");
+assert.equal(keyCase("\x1b[D"), "left", "plain Left still folds the current project only");
+assert.equal(keyCase("\x1b[A"), "up", "plain Up still moves one row");
+
 // Every shortcut can be replaced from the config file.
 const CUSTOM: SidebarKeyConfig = {
   focus: "alt+s",
   toggle: "alt+t",
   wider: "alt+=",
   narrower: "alt+-",
+  collapseAll: "alt+c",
+  expandAll: "alt+e",
+  prevFolder: "alt+p",
+  nextFolder: "alt+n",
 };
 const customCase = (data: string): string => {
   const a = decodeSidebarKey(data, CUSTOM);
@@ -532,6 +553,15 @@ assert.equal(customCase("\x1bs"), "exit", "custom focus key works");
 assert.equal(customCase("\x1bt"), "toggleSidebar", "custom toggle key works");
 assert.equal(customCase("\x1b="), "wider", "custom wider key works");
 assert.equal(customCase("\x1b-"), "narrower", "custom narrower key works");
+assert.equal(customCase("\x1bc"), "collapseAll", "custom collapse-all key works");
+assert.equal(customCase("\x1be"), "expandAll", "custom expand-all key works");
+assert.equal(customCase("\x1bp"), "prevFolder", "custom previous-project key works");
+assert.equal(customCase("\x1bn"), "nextFolder", "custom next-project key works");
+assert.equal(
+  customCase("\x1b[1;2D"),
+  "ignore",
+  "the default collapse-all key is unbound once replaced",
+);
 assert.equal(
   customCase("\x1b[104;6u"),
   "ignore",
@@ -571,5 +601,45 @@ assert.equal(takePendingRefocus(), true, "pending refocus survives a reload");
 assert.equal(takePendingRefocus(), false, "marker is consumed exactly once");
 setPendingRefocus(false); // leave no stray state behind
 assert.equal(takePendingRefocus(), false, "cleared marker stays cleared");
+
+// --- Ctrl+H needs the kitty keyboard protocol --------------------------------
+// Its legacy byte is 0x08, the same as Backspace, so the key is skipped unless
+// the terminal can tell them apart — otherwise every Backspace would toggle the
+// panel. The Ctrl+Shift+H alias keeps working either way.
+const focusList = DEFAULT_KEYS.focus; // "ctrl+h, ctrl+shift+h"
+assert.equal(
+  matchesConfiguredKeys("\x7f", focusList),
+  false,
+  "plain Backspace never focuses the sidebar",
+);
+assert.equal(
+  matchesConfiguredKeys("\x08", focusList),
+  false,
+  "the Ctrl+H byte is skipped while the kitty protocol is off",
+);
+assert.equal(
+  matchesConfiguredKeys("\x1b[104;6u", focusList),
+  true,
+  "the Ctrl+Shift+H alias still focuses without the kitty protocol",
+);
+assert.deepEqual(
+  unusableConfiguredKeys(focusList),
+  ["ctrl+h"],
+  "Ctrl+H is reported as unusable without the kitty protocol",
+);
+
+setKittyProtocolActive(true);
+assert.equal(
+  matchesConfiguredKeys("\x1b[104;5u", focusList),
+  true,
+  "Ctrl+H focuses once the kitty protocol is active",
+);
+assert.equal(
+  matchesConfiguredKeys("\x7f", focusList),
+  false,
+  "Backspace still never focuses the sidebar",
+);
+assert.deepEqual(unusableConfiguredKeys(focusList), [], "every key is usable with kitty on");
+setKittyProtocolActive(false);
 
 console.log("✓ all smoke tests passed");

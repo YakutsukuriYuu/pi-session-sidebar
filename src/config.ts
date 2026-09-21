@@ -4,9 +4,9 @@ import { dirname, join } from "node:path";
 
 /**
  * User-configurable shortcuts. Any key id that pi understands can be used
- * (e.g. "ctrl+shift+h", "alt+s", "f5"). Keys bound by pi or by pi-tui's editor
- * should be avoided: the sidebar consumes them globally, so pi would stop
- * seeing them.
+ * (e.g. "ctrl+h", "alt+s", "f5"), and each field accepts a comma-separated
+ * list so a key can have aliases. Keys bound by pi or by pi-tui's editor should
+ * be avoided: the sidebar consumes them globally, so pi would stop seeing them.
  */
 export interface SidebarKeyConfig {
   /** Focus the sidebar (and unfocus it again). */
@@ -16,6 +16,12 @@ export interface SidebarKeyConfig {
   /** Grow / shrink the sidebar width by one column. */
   wider: string;
   narrower: string;
+  /** Collapse / expand every project at once. */
+  collapseAll: string;
+  expandAll: string;
+  /** Jump to the previous / next project root. */
+  prevFolder: string;
+  nextFolder: string;
 }
 
 export interface SidebarConfig {
@@ -30,7 +36,10 @@ export const MAX_WIDTH = 60;
 export const DEFAULT_WIDTH = 30;
 
 export const DEFAULT_KEYS: SidebarKeyConfig = {
-  focus: "ctrl+shift+h",
+  // Ctrl+H is one modifier away instead of two. Its legacy byte is 0x08, the
+  // same as Backspace, so it only works on terminals that report the kitty
+  // keyboard protocol — keys.ts skips it otherwise and the alias takes over.
+  focus: "ctrl+h, ctrl+shift+h",
   // `b` (bar) is free in pi, pi-tui's editor and the fullscreen viewport.
   toggle: "ctrl+shift+b",
   // Shift+= produces "+" on most layouts; the base key id is "=" — see
@@ -38,6 +47,12 @@ export const DEFAULT_KEYS: SidebarKeyConfig = {
   // produced character instead.
   wider: "ctrl+shift+=",
   narrower: "ctrl+shift+-",
+  // Shift+arrows are unbound in pi, pi-tui's editor and the fullscreen viewport
+  // (which uses ctrl+shift+arrows for prompt jumps).
+  collapseAll: "shift+left",
+  expandAll: "shift+right",
+  prevFolder: "shift+up",
+  nextFolder: "shift+down",
 };
 
 function configPath(): string {
@@ -90,6 +105,10 @@ function parseKeys(raw: Record<string, unknown>): SidebarKeyConfig {
     toggle: keyOr(section.toggle, DEFAULT_KEYS.toggle),
     wider: keyOr(section.wider, DEFAULT_KEYS.wider),
     narrower: keyOr(section.narrower, DEFAULT_KEYS.narrower),
+    collapseAll: keyOr(section.collapseAll, DEFAULT_KEYS.collapseAll),
+    expandAll: keyOr(section.expandAll, DEFAULT_KEYS.expandAll),
+    prevFolder: keyOr(section.prevFolder, DEFAULT_KEYS.prevFolder),
+    nextFolder: keyOr(section.nextFolder, DEFAULT_KEYS.nextFolder),
   };
 }
 

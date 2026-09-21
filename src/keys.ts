@@ -1,4 +1,4 @@
-import { decodeKittyPrintable, isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
+import { decodeKittyPrintable, isKeyRelease, isKeyRepeat, isKittyProtocolActive, matchesKey } from "@earendil-works/pi-tui";
 import type { KeyId } from "@earendil-works/pi-tui";
 import type { SidebarKeyConfig } from "./config.ts";
 
@@ -20,6 +20,11 @@ export type SidebarAction =
   /** Width shortcuts: one column per press. */
   | { type: "wider" }
   | { type: "narrower" }
+  /** Bulk project operations and project-to-project jumps. */
+  | { type: "collapseAll" }
+  | { type: "expandAll" }
+  | { type: "prevFolder" }
+  | { type: "nextFolder" }
   | { type: "backspace" }
   | { type: "clearSearch" }
   | { type: "type"; text: string }
@@ -56,6 +61,41 @@ export function matchesConfiguredKey(data: string, keyId: string): boolean {
 }
 
 /**
+ * Keys whose legacy encoding is a control code that already means something
+ * else: ctrl+h is 0x08 (Backspace), ctrl+i is 0x09 (Tab), ctrl+j is 0x0a (LF)
+ * and ctrl+m is 0x0d (CR). Terminals only tell them apart once the kitty
+ * keyboard protocol is active, so without it they are skipped — otherwise
+ * every Backspace would toggle the panel.
+ */
+const LEGACY_AMBIGUOUS_KEYS = new Set(["ctrl+h", "ctrl+i", "ctrl+j", "ctrl+m"]);
+
+/** Split a configured value into individual key ids (comma-separated lists allowed). */
+function configuredKeys(value: string): string[] {
+  return value
+    .split(",")
+    .map((key) => key.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** False when this terminal cannot distinguish the key from a control code. */
+export function isKeyUsable(keyId: string): boolean {
+  return isKittyProtocolActive() || !LEGACY_AMBIGUOUS_KEYS.has(keyId);
+}
+
+/** Configured keys this terminal has to skip, for a one-time hint. */
+export function unusableConfiguredKeys(configured: string): string[] {
+  return configuredKeys(configured).filter((key) => !isKeyUsable(key));
+}
+
+/** Match raw input against a configured key or comma-separated list of keys. */
+export function matchesConfiguredKeys(data: string, configured: string): boolean {
+  if (!data || !configured) return false;
+  return configuredKeys(configured).some(
+    (keyId) => isKeyUsable(keyId) && matchesConfiguredKey(data, keyId),
+  );
+}
+
+/**
  * Events that must be swallowed no matter where focus is.
  *
  * Key releases carry no input content, but pi's editor does not filter them, so
@@ -69,7 +109,7 @@ export function isInertKeyEvent(data: string, keys: SidebarKeyConfig): boolean {
   if (isKeyRelease(data)) return true;
   if (!isKeyRepeat(data)) return false;
   return [keys.focus, keys.toggle, keys.wider, keys.narrower].some((key) =>
-    matchesConfiguredKey(data, key),
+    matchesConfiguredKeys(data, key),
   );
 }
 
@@ -93,8 +133,15 @@ export function decodeSidebarKey(data: string, keys: SidebarKeyConfig): SidebarA
 
   // Leave focus: the focus shortcut itself (so it toggles) or Escape.
   if (!repeat && matchesKey(data, "escape")) return { type: "exit" };
-  if (!repeat && matchesConfiguredKey(data, keys.focus)) return { type: "exit" };
-  if (!repeat && matchesConfiguredKey(data, keys.toggle)) return { type: "toggleSidebar" };
+  if (!repeat && matchesConfiguredKeys(data, keys.focus)) return { type: "exit" };
+  if (!repeat && matchesConfiguredKeys(data, keys.toggle)) return { type: "toggleSidebar" };
+
+  // Project bulk operations and jumps. Checked before the plain arrows, which
+  // matchesKey keeps separate (it matches modifiers exactly).
+  if (!repeat && matchesConfiguredKeys(data, keys.collapseAll)) return { type: "collapseAll" };
+  if (!repeat && matchesConfiguredKeys(data, keys.expandAll)) return { type: "expandAll" };
+  if (!repeat && matchesConfiguredKeys(data, keys.prevFolder)) return { type: "prevFolder" };
+  if (!repeat && matchesConfiguredKeys(data, keys.nextFolder)) return { type: "nextFolder" };
 
   if (matchesKey(data, "up")) return { type: "up" };
   if (matchesKey(data, "down")) return { type: "down" };
@@ -111,8 +158,8 @@ export function decodeSidebarKey(data: string, keys: SidebarKeyConfig): SidebarA
 
   if (!repeat && matchesKey(data, "ctrl+n")) return { type: "new" };
   if (!repeat && matchesKey(data, "ctrl+r")) return { type: "rename" };
-  if (!repeat && matchesConfiguredKey(data, keys.wider)) return { type: "wider" };
-  if (!repeat && matchesConfiguredKey(data, keys.narrower)) return { type: "narrower" };
+  if (!repeat && matchesConfiguredKeys(data, keys.wider)) return { type: "wider" };
+  if (!repeat && matchesConfiguredKeys(data, keys.narrower)) return { type: "narrower" };
   if (!repeat && matchesKey(data, "ctrl+u")) return { type: "clearSearch" };
   if (matchesKey(data, "backspace")) return { type: "backspace" };
   if (!repeat && matchesKey(data, "tab")) return { type: "right" };

@@ -13,7 +13,7 @@ import {
   DEFAULT_KEYS,
 } from "./src/config.ts";
 import { SessionSidebarCompositor } from "./src/compositor.ts";
-import { decodeSidebarKey, isInertKeyEvent, matchesConfiguredKey } from "./src/keys.ts";
+import { decodeSidebarKey, isInertKeyEvent, matchesConfiguredKeys, unusableConfiguredKeys } from "./src/keys.ts";
 import {
   filterSessions,
   flattenRows,
@@ -28,6 +28,9 @@ const MIN_RAW_COLUMNS = 100;
 
 /** Our own command, used to reach a command context (see submitCommand). */
 const CMD = "/session-sidebar";
+
+/** Module state survives runtime rebinds, so this warning is once per process. */
+let warnedAboutUnusableFocusKeys = false;
 
 export default function (pi: ExtensionAPI) {
   let config = loadConfig();
@@ -328,6 +331,79 @@ export default function (pi: ExtensionAPI) {
     toggleGroupCollapsed(cwd);
   }
 
+  /** Identity of the row the cursor sits on, used to keep it put across list changes. */
+  type RowAnchor = { kind: "session"; path: string } | { kind: "group"; cwd: string } | null;
+
+  function selectionAnchor(): RowAnchor {
+    const target = currentRow();
+    if (!target) return null;
+    if (target.session) return { kind: "session", path: target.session.path };
+    const cwd = buildState().groups[target.row.groupIndex]?.cwd;
+    return cwd ? { kind: "group", cwd } : null;
+  }
+
+  /** Put the cursor back on the anchored row, converging to its project if hidden. */
+  function restoreSelection(anchor: RowAnchor): void {
+    const state = buildState();
+    const findSessionRow = (path: string): number =>
+      state.flatRows.findIndex((row) => {
+        if (row.kind !== "session") return false;
+        return state.groups[row.groupIndex]?.sessions[row.sessionIndex ?? 0]?.path === path;
+      });
+    const findGroupRowOfSession = (path: string): number =>
+      state.flatRows.findIndex((row) => {
+        if (row.kind !== "group") return false;
+        return Boolean(state.groups[row.groupIndex]?.sessions.some((s) => s.path === path));
+      });
+    const findGroupRow = (cwd: string): number =>
+      state.flatRows.findIndex(
+        (row) => row.kind === "group" && state.groups[row.groupIndex]?.cwd === cwd,
+      );
+
+    let index = -1;
+    if (anchor?.kind === "group") index = findGroupRow(anchor.cwd);
+    else if (anchor?.kind === "session") {
+      index = findSessionRow(anchor.path);
+      // Collapsing hid the session: fall back to its project heading.
+      if (index < 0) index = findGroupRowOfSession(anchor.path);
+    }
+    if (index >= 0) selectedIndex = index;
+    else clampSelection();
+  }
+
+  /** Collapse every project — the current one included, so "all" means all. */
+  function collapseAllGroups(): void {
+    const anchor = selectionAnchor();
+    for (const group of buildState().groups) collapsedCwds.add(group.cwd);
+    selectionPinnedToCurrent = false;
+    restoreSelection(anchor);
+    schedulePaint();
+  }
+
+  function expandAllGroups(): void {
+    const anchor = selectionAnchor();
+    collapsedCwds.clear();
+    restoreSelection(anchor);
+    schedulePaint();
+  }
+
+  /** Move the cursor to the previous/next project heading (no wrap-around). */
+  function jumpToFolder(direction: number): void {
+    const state = buildState();
+    const groupRows: number[] = [];
+    state.flatRows.forEach((row, index) => {
+      if (row.kind === "group") groupRows.push(index);
+    });
+    if (groupRows.length === 0) return;
+    const currentGroup = state.flatRows[selectedIndex]?.groupIndex ?? 0;
+    const target = Math.min(Math.max(0, currentGroup + direction), groupRows.length - 1);
+    const targetIndex = groupRows[target];
+    if (targetIndex === undefined || targetIndex === selectedIndex) return;
+    selectionPinnedToCurrent = false;
+    selectedIndex = targetIndex;
+    schedulePaint();
+  }
+
   // --- Raw keyboard input ---------------------------------------------------------
   function handleInput(data: string): { consume?: boolean; data?: string } | undefined {
     // Key releases (and held-down repeats of the shortcut keys) are swallowed
@@ -339,22 +415,22 @@ export default function (pi: ExtensionAPI) {
     // swallowed instead of acted on, so holding a key cannot race ahead (the
     // panel would flip back and forth, or the width would run to the limit).
     const repeat = isKeyRepeat(data);
-    if (matchesConfiguredKey(data, config.keys.focus)) {
+    if (matchesConfiguredKeys(data, config.keys.focus)) {
       if (!repeat) {
         if (focused) exitFocus();
         else enterFocus();
       }
       return { consume: true };
     }
-    if (matchesConfiguredKey(data, config.keys.toggle)) {
+    if (matchesConfiguredKeys(data, config.keys.toggle)) {
       if (!repeat) toggleSidebar();
       return { consume: true };
     }
-    if (matchesConfiguredKey(data, config.keys.wider)) {
+    if (matchesConfiguredKeys(data, config.keys.wider)) {
       if (!repeat) resizeSidebar(1);
       return { consume: true };
     }
-    if (matchesConfiguredKey(data, config.keys.narrower)) {
+    if (matchesConfiguredKeys(data, config.keys.narrower)) {
       if (!repeat) resizeSidebar(-1);
       return { consume: true };
     }
@@ -383,6 +459,19 @@ export default function (pi: ExtensionAPI) {
         return { consume: true };
       case "right":
         collapseOrExpandSelected(true);
+        return { consume: true };
+
+      case "collapseAll":
+        collapseAllGroups();
+        return { consume: true };
+      case "expandAll":
+        expandAllGroups();
+        return { consume: true };
+      case "prevFolder":
+        jumpToFolder(-1);
+        return { consume: true };
+      case "nextFolder":
+        jumpToFolder(1);
         return { consume: true };
 
       case "switch": {
@@ -438,6 +527,32 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * Ctrl+H shares its legacy byte with Backspace; only terminals that speak the
+   * kitty keyboard protocol can tell them apart, and keys.ts silently skips it
+   * otherwise. Say so once, after the protocol negotiation has had time to
+   * finish, so the missing shortcut is not a mystery.
+   */
+  function warnAboutUnusableFocusKeys(): void {
+    if (warnedAboutUnusableFocusKeys) return;
+    const timer = setTimeout(() => {
+      const unusable = unusableConfiguredKeys(config.keys.focus);
+      if (unusable.length === 0) return;
+      warnedAboutUnusableFocusKeys = true;
+      const usable = config.keys.focus
+        .split(",")
+        .map((key) => key.trim())
+        .filter((key) => key && !unusable.includes(key.toLowerCase()));
+      currentCtx?.ui.notify(
+        `当前终端无法区分 ${unusable.join("/")}（与退格等键同码），已忽略；聚焦侧栏请用 ${
+          usable.join(" 或 ") || "配置里的其它键"
+        }`,
+        "info",
+      );
+    }, 1500);
+    timer.unref?.();
+  }
+
   // --- Extension wiring ------------------------------------------------------------
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
@@ -476,6 +591,8 @@ export default function (pi: ExtensionAPI) {
     // A "switch and stay" reloaded the extension; re-take focus.
     const refocus = takePendingRefocus();
     if (refocus) enterFocus();
+
+    warnAboutUnusableFocusKeys();
 
     await refreshSessions();
     if (focused) selectCurrentSession();
