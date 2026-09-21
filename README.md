@@ -18,6 +18,50 @@ ChatGPT 风格的左侧会话导航栏，直接嵌入 [Pi](https://pi.dev) 的�
 - 第二行：搜索框（聚焦时）或聚焦快捷键提示（未聚焦时）
 - 底部一行：滚动位置（`↑3` / `↓5`）与搜索匹配数（`3/7 匹配`）
 
+## 安装
+
+要求：pi ≥ 0.85（在 0.85.1 上开发验证）。无运行时依赖。
+
+```bash
+pi install git:github.com/YakutsukuriYuu/pi-session-sidebar
+```
+
+安装后重启 pi，或在 pi 里执行 `/reload`。
+
+| 操作 | 命令 |
+| --- | --- |
+| 安装 | `pi install git:github.com/YakutsukuriYuu/pi-session-sidebar` |
+| 更新 | `pi update git:github.com/YakutsukuriYuu/pi-session-sidebar` |
+| 卸载 | `pi remove git:github.com/YakutsukuriYuu/pi-session-sidebar` |
+| 查看已安装 | `pi list` |
+
+**验证**：启动后左侧应出现会话栏；执行 `/session-sidebar`（不带参数）会打印当前生效的快捷键。
+
+### 项目级安装
+
+只给某个项目启用（写入该项目的 `.pi/settings.json`）：
+
+```bash
+pi install git:github.com/YakutsukuriYuu/pi-session-sidebar -l
+```
+
+### 开发模式
+
+```bash
+git clone https://github.com/YakutsukuriYuu/pi-session-sidebar.git
+pi -e /path/to/pi-session-sidebar/index.ts     # 临时加载，退出即失效
+```
+
+或软链到扩展目录，改完 `/reload` 即生效：
+
+```bash
+ln -s /path/to/pi-session-sidebar ~/.pi/agent/extensions/pi-session-sidebar
+```
+
+⚠️ 不要同时使用 `pi install` 与软链——插件会被加载两次（两个侧栏合成器会互相打架）。
+
+## 界面
+
 ### 文件夹与会话的视觉区分
 
 | 元素 | 图标 | 颜色 | 光标颜色（被选中时） |
@@ -49,42 +93,6 @@ ChatGPT 风格的左侧会话导航栏，直接嵌入 [Pi](https://pi.dev) 的�
 - 光标停在**文件夹行**时，它会取代该行的图标位置（折叠状态由下方是否有子行体现）；
   项目栏的 `▌` 也会让位给光标
 
-### 运行中保护
-
-```
-当前会话正在运行，不能切换
-```
-
-- 判定依据：`ctx.isIdle()` 为准（pi 自己知道有没有运行在跑，且不会过期）。`agent_start` 事件只用于覆盖
-  "pi 的 idle 状态尚未更新"的瞬间，并且**2 秒后自动失效**——所以即使 `agent_settled` 因故没触发，
-  也**不会把切换永久锁死**
-- 只拦**本插件自己的动作**：Enter 切换、`Ctrl+N` 新建、`/session-sidebar switch|new`
-- 被拒绝后侧栏保持焦点，等它跑完再按 Enter 即可；想强制切换就按 `Esc` 中断当前回答（pi 原生行为）
-- 关闭方式：配置里 `"guardBusySession": false`
-
-### 性能
-
-会话切换曾经要重新扫描全部会话列表：实测 **56 个会话耗时 266 ms**（`SessionManager.listAll()`
-会把每个文件从头读到尾，为了算首条消息、消息数与全文检索字段——侧栏一项都不用）。
-
-现在的做法：
-
-| 手段 | 效果 |
-| --- | --- |
-| 只读**头部一行**（session id / cwd）+ `statSync`（时间），标题只读文件**头尾两小段** | 首次扫描 **266 ms → 6 ms（44×）** |
-| 标题**按文件版本缓存**（size + mtime），未改动的文件不再读 | 缓存命中 **2 ms（133×）** |
-| 列表缓存在**模块级**（扩展工厂被缓存，会话替换后仍存活）+ **15 秒 TTL** | 切换时通常**完全不扫描**，直接由缓存渲染 |
-| 刷新策略：首次加载、TTL 过期、侧栏聚焦、重命名后、手动刷新 | 不再每次切换都扫 |
-
-### 切换动画
-
-切换过程中扩展会被重载，所以动画由两个实例接力：
-
-1. **切换前**（旧实例）：按下 Enter 时**同步绘制**底部提示 `⟳ 正在切换 → 目标会话`
-   （用防抖绘制会输给切换本身，所以这里是立即绘制）
-2. **切换后**（新实例）：当前会话行的 `●` 变成旋转指示器 `⣾⣽⣻⢿⡿⣟⣯⣷`，**转两圈**（约 1.1 秒）
-   后定格；帧间隔 70 ms，播完即停，不会常驻消耗
-
 ### 宽度自适应
 
 时间列只在**标题至少能保留 19 列**时才出现，否则整列隐藏（不会把标题挤没）：
@@ -113,16 +121,6 @@ ChatGPT 风格的左侧会话导航栏，直接嵌入 [Pi](https://pi.dev) 的�
 - **窄终端自动折叠**：终端宽度小于 100 列时自动隐藏，恢复后自动出现
 - **宽度可调**：`Ctrl+Shift+=` 变宽 / `Ctrl+Shift+-` 变窄（每次 1 列，范围 20–60，自动记忆），或用 `/session-sidebar width 30`
 - **快捷键可自定义**：聚焦 / 显隐 / 加宽 / 变窄四个键都可在配置文件的 `keys` 段里改
-
-## 安装
-
-```bash
-# 从本地目录安装
-pi install /path/to/pi-session-sidebar
-
-# 或开发模式直接加载
-pi -e /path/to/pi-session-sidebar/index.ts
-```
 
 ## 使用
 
@@ -168,7 +166,20 @@ pi -e /path/to/pi-session-sidebar/index.ts
 - 宽度键需要终端上报 shift 组合键（与你现有的 `Ctrl+Shift+H` 同一前提）；`+` 在部分终端上报的是字符码而非键码，插件已同时兼容两种格式
 - 聚焦时 `+` / `-` / `=` 仍然是普通搜索字符，不会误触发宽度调整
 
-### 配置
+### 命令
+
+```text
+/session-sidebar nav         聚焦/离开侧栏（不依赖快捷键，任何终端可用）
+/session-sidebar on          显示侧栏
+/session-sidebar off         隐藏侧栏
+/session-sidebar width 30    设置宽度（20-60）
+/session-sidebar all         显示所有项目的会话（默认）
+/session-sidebar current     只显示当前项目的会话
+/session-sidebar refresh     手动刷新会话列表
+/session-sidebar             无参数：打印当前生效的快捷键
+```
+
+## 配置
 
 配置保存在 `~/.pi/agent/pi-session-sidebar.json`（修改后 `/reload` 生效；运行时的 on/off/width 变更会自动回写）：
 
@@ -238,18 +249,43 @@ keyboard protocol（Ghostty / kitty / WezTerm / iTerm2 新版支持）时才能�
 - `Ctrl+Shift++` 这类带 `+` 的组合无法直接写成键名，用 `=` 代替（插件已兼容终端上报 `+` 字符码的情况）
 - 旧的写法 `"focusKey": "..."` 仍然兼容（等价于 `keys.focus`），保存后会自动迁移成 `keys` 形式
 
-### 命令
+## 行为细节
+
+### 运行中保护
 
 ```text
-/session-sidebar nav         聚焦/离开侧栏（不依赖快捷键，任何终端可用）
-/session-sidebar on          显示侧栏
-/session-sidebar off         隐藏侧栏
-/session-sidebar width 30    设置宽度（20-60）
-/session-sidebar all         显示所有项目的会话（默认）
-/session-sidebar current     只显示当前项目的会话
-/session-sidebar refresh     手动刷新会话列表
-/session-sidebar             无参数：打印当前生效的快捷键
+当前会话正在运行，不能切换
 ```
+
+- 判定依据：`ctx.isIdle()` 为准（pi 自己知道有没有运行在跑，且不会过期）。`agent_start` 事件只用于覆盖
+  "pi 的 idle 状态尚未更新"的瞬间，并且**2 秒后自动失效**——所以即使 `agent_settled` 因故没触发，
+  也**不会把切换永久锁死**
+- 只拦**本插件自己的动作**：Enter 切换、`Ctrl+N` 新建、`/session-sidebar switch|new`
+- 被拒绝后侧栏保持焦点，等它跑完再按 Enter 即可；想强制切换就按 `Esc` 中断当前回答（pi 原生行为）
+- 关闭方式：配置里 `"guardBusySession": false`
+
+### 性能
+
+会话切换曾经要重新扫描全部会话列表：实测 **56 个会话耗时 266 ms**（`SessionManager.listAll()`
+会把每个文件从头读到尾，为了算首条消息、消息数与全文检索字段——侧栏一项都不用）。
+
+现在的做法：
+
+| 手段 | 效果 |
+| --- | --- |
+| 只读**头部一行**（session id / cwd）+ `statSync`（时间），标题只读文件**头尾两小段** | 首次扫描 **266 ms → 6 ms（44×）** |
+| 标题**按文件版本缓存**（size + mtime），未改动的文件不再读 | 缓存命中 **2 ms（133×）** |
+| 列表缓存在**模块级**（扩展工厂被缓存，会话替换后仍存活）+ **15 秒 TTL** | 切换时通常**完全不扫描**，直接由缓存渲染 |
+| 刷新策略：首次加载、TTL 过期、侧栏聚焦、重命名后、手动刷新 | 不再每次切换都扫 |
+
+### 切换动画
+
+切换过程中扩展会被重载，所以动画由两个实例接力：
+
+1. **切换前**（旧实例）：按下 Enter 时**同步绘制**底部提示 `⟳ 正在切换 → 目标会话`
+   （用防抖绘制会输给切换本身，所以这里是立即绘制）
+2. **切换后**（新实例）：当前会话行的 `●` 变成旋转指示器 `⣾⣽⣻⢿⡿⣟⣯⣷`，**转两圈**（约 1.1 秒）
+   后定格；帧间隔 70 ms，播完即停，不会常驻消耗
 
 ## 工作原理
 
