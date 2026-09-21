@@ -132,4 +132,40 @@ assert.ok(!frame.includes("\x1b[2K"), "no full-line erase remains");
 comp.dispose();
 assert.equal(fakeTerminal.columns, 120, "columns restored");
 
+// Narrow terminal: sidebar must be fully inert (no transform, no narrowing)
+const written2: string[] = [];
+const narrowTerminal = {
+  columns: 80,
+  rows: 24,
+  write(data: string) {
+    written2.push(data);
+  },
+};
+const narrowTui = {
+  terminal: narrowTerminal,
+  doRender() {
+    this.terminal.write("\x1b[?2026h\r\nhello\x1b[2K\x1b[5G\x1b[?2026l");
+  },
+};
+const comp2 = new SessionSidebarCompositor(
+  narrowTui,
+  () => ({ ...state, flatRows: [], groups: [] }),
+  30,
+  100,
+);
+let autoHidden = false;
+comp2.onAutoHide = () => {
+  autoHidden = true;
+};
+comp2.install();
+assert.equal(narrowTerminal.columns, 80, "narrow terminal: columns untouched");
+assert.equal(comp2.isActive(), false, "inactive below min width");
+narrowTui.doRender();
+const narrowFrame = written2[0];
+assert.ok(narrowFrame.includes("\x1b[?2026h"), "narrow: pi sync markers untouched");
+assert.ok(narrowFrame.includes("\r\nhello"), "narrow: no shift injected");
+assert.ok(narrowFrame.includes("\x1b[2K"), "narrow: erase untouched");
+assert.ok(autoHidden, "auto-hide callback fired");
+comp2.dispose();
+
 console.log("✓ all smoke tests passed");

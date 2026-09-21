@@ -71,6 +71,9 @@ export class SessionSidebarCompositor {
   private cachedLines: string[] | null = null;
   private cachedRows = 0;
   private cacheValid = false;
+  /** Called when the sidebar auto-hides because the terminal got too narrow. */
+  onAutoHide: (() => void) | null = null;
+  private autoHideNotified = false;
 
   constructor(
     tui: any,
@@ -118,6 +121,18 @@ export class SessionSidebarCompositor {
         let result: any;
         let didThrow = false;
         let thrown: unknown;
+
+        // When the terminal is too narrow the sidebar is inactive: render pi
+        // completely untouched (pi full-redraws on the width change itself).
+        if (!self.active()) {
+          self.cacheValid = false;
+          try {
+            return originalDoRender.apply(this, args);
+          } finally {
+            self.notifyAutoHide();
+          }
+        }
+        self.autoHideNotified = false;
 
         self.originalWrite("\x1b[?2026h"); // begin synchronized output
         try {
@@ -167,8 +182,18 @@ export class SessionSidebarCompositor {
   }
 
   /** True when the terminal is wide enough for the sidebar. */
+  isActive(): boolean {
+    return this.active();
+  }
+
   private active(): boolean {
     return this.rawColumns() >= this.minRawColumns;
+  }
+
+  private notifyAutoHide(): void {
+    if (this.autoHideNotified) return;
+    this.autoHideNotified = true;
+    this.onAutoHide?.();
   }
 
   private rawColumns(): number {
@@ -209,8 +234,10 @@ export class SessionSidebarCompositor {
     if (this.disposed) return;
     if (!this.active()) {
       this.cacheValid = false;
+      this.notifyAutoHide();
       return;
     }
+    this.autoHideNotified = false;
 
     const rawRows = Math.max(1, this.terminal.rows ?? 24);
     const w = this.reservedWidth;

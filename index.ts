@@ -152,12 +152,17 @@ export default function (pi: ExtensionAPI) {
   // --- Nav mode ------------------------------------------------------------------
   function enterNavMode(): void {
     if (navMode) return;
+    if (!compositor || !compositor.isActive()) {
+      currentCtx?.ui.notify("终端太窄，会话侧栏已自动隐藏，无法进入导航", "warning");
+      return;
+    }
     navMode = true;
     selectCurrentSession();
     currentCtx?.ui.setStatus(
       "session-sidebar",
       "会话导航: ↑↓ 移动 · Enter 切换 · ←→ 折叠 · n 新建 · r 重命名 · / 搜索 · Esc 退出",
     );
+    currentCtx?.ui.notify("已进入会话导航（Esc 退出）", "info");
     schedulePaint();
   }
 
@@ -299,9 +304,9 @@ export default function (pi: ExtensionAPI) {
         return { consume: true };
       }
       default:
-        // Consume everything else while nav mode is active so keystrokes
-        // don't leak into the editor.
-        return { consume: true };
+        // Pass through everything else (typing, Shift+Enter, Ctrl+C, …) so a
+        // forgotten nav mode never hijacks normal editing.
+        return undefined;
     }
   }
 
@@ -325,6 +330,16 @@ export default function (pi: ExtensionAPI) {
       (tui: unknown) => {
         tuiRef = tui;
         installCompositor();
+        // When the terminal shrinks below the minimum width the sidebar hides
+        // itself; leave nav mode so keys are never swallowed invisibly.
+        if (compositor) {
+          compositor.onAutoHide = () => {
+            if (navMode) {
+              exitNavMode();
+              currentCtx?.ui.notify("窗口过窄，会话导航已退出", "info");
+            }
+          };
+        }
         return {
           dispose() {
             compositor?.dispose();
@@ -373,6 +388,10 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
       switch (sub) {
+        case "nav":
+          if (navMode) exitNavMode();
+          else enterNavMode();
+          break;
         case "on":
           config = { ...config, enabled: true };
           saveConfig(config);
@@ -446,7 +465,7 @@ export default function (pi: ExtensionAPI) {
         }
         default:
           ctx.ui.notify(
-            "用法: /session-sidebar on|off|width <n>|all|current|refresh —— Ctrl+Shift+H 进入会话导航",
+            "用法: /session-sidebar nav|on|off|width <n>|all|current|refresh —— Ctrl+Shift+H 进入会话导航",
             "info",
           );
       }
@@ -456,7 +475,7 @@ export default function (pi: ExtensionAPI) {
 
   // --- Shortcut: toggle nav mode --------------------------------------------------
   pi.registerShortcut("ctrl+shift+h", {
-    description: "进入/退出会话侧栏导航",
+    description: "进入/退出会话侧栏导航（终端不支持时用 /session-sidebar nav）",
     handler: async (ctx) => {
       currentCtx = ctx;
       if (!config.enabled) {

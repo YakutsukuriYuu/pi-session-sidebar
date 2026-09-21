@@ -42,7 +42,7 @@ pi -e /path/to/pi-session-sidebar/index.ts
 
 | 操作 | 方式 |
 | --- | --- |
-| 进入/退出会话导航 | `Ctrl+Shift+H` |
+| 进入/退出会话导航 | `Ctrl+Shift+H` 或 `/session-sidebar nav` |
 | 移动选择 | `↑` / `↓`（或 `g` / `G` 跳首尾） |
 | 切换会话 | `Enter` |
 | 折叠/展开项目 | `←` / `→` 或 `Enter`（选中分组行时） |
@@ -54,6 +54,7 @@ pi -e /path/to/pi-session-sidebar/index.ts
 ### 命令
 
 ```text
+/session-sidebar nav         进入/退出会话导航（不依赖快捷键）
 /session-sidebar on          开启侧栏
 /session-sidebar off         关闭侧栏
 /session-sidebar width 30    设置宽度（20-60）
@@ -100,7 +101,12 @@ Pi 的扩展 API 不提供"修改主布局"的正式接口，所以本插件采�
 ## 限制
 
 - 仅在 TUI 模式生效（`pi` 交互模式），RPC/print 模式自动跳过
-- 终端宽度 < 100 列时自动隐藏
+- 终端宽度 < 100 列时自动隐藏，恢复宽度后自动出现；自动隐藏时会同时退出导航模式
+- `Ctrl+Shift+H` 需要终端支持 Kitty keyboard protocol 才能识别（Ghostty、kitty、
+  WezTerm、iTerm2 新版均支持）。如果按下无反应，说明终端不上报该组合键，请改用
+  `/session-sidebar nav`，或在 `~/.pi/agent/keybindings.json` 中重新绑定
+- 导航模式只拦截导航键（方向键、Enter、Esc、`n`、`r`、`/`、`g`、`G`），其余按键
+  （包括 Shift+Enter、Ctrl+C、正常输入）都会直接传给编辑器
 - 导航模式不支持鼠标（终端鼠标事件处理留待后续版本）
 - 会话内分支树（`/tree` 的 fork 结构）暂不在侧栏显示，计划中
 
