@@ -31,6 +31,12 @@ export interface SidebarConfig {
   enabled: boolean;
   width: number;
   showAllProjects: boolean;
+  /**
+   * Refuse the sidebar's own session switches while the current session is
+   * still working, so a running answer cannot be cancelled by accident.
+   * pi's own commands (/resume, /new, ...) are never touched.
+   */
+  guardBusySession: boolean;
   keys: SidebarKeyConfig;
 }
 
@@ -129,6 +135,7 @@ export function loadConfig(): SidebarConfig {
       enabled: raw.enabled !== false,
       width: clampWidth(typeof raw.width === "number" ? raw.width : DEFAULT_WIDTH),
       showAllProjects: raw.showAllProjects !== false,
+      guardBusySession: raw.guardBusySession !== false,
       keys: parseKeys(raw),
     };
   } catch {
@@ -136,6 +143,7 @@ export function loadConfig(): SidebarConfig {
       enabled: true,
       width: DEFAULT_WIDTH,
       showAllProjects: true,
+      guardBusySession: true,
       keys: { ...DEFAULT_KEYS },
     };
   }
@@ -150,6 +158,7 @@ export function saveConfig(config: SidebarConfig): void {
       enabled: config.enabled,
       width: config.width,
       showAllProjects: config.showAllProjects,
+      guardBusySession: config.guardBusySession,
       keys: config.keys,
     };
     writeFileSync(path, JSON.stringify(payload, null, 2) + "\n", "utf8");

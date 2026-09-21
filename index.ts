@@ -50,6 +50,13 @@ const PULSE_INTERVAL_MS = 70;
 /** How long the "switching to …" hint stays if the switch never lands. */
 const PENDING_SWITCH_MS = 5000;
 
+/**
+ * How long an `agent_start` that pi no longer reports as busy is still treated
+ * as busy. Bounded on purpose: the guard must never be able to lock switching
+ * out if the matching `agent_settled` is missed.
+ */
+const BUSY_GRACE_MS = 2000;
+
 export default function (pi: ExtensionAPI) {
   let config = loadConfig();
 
@@ -81,6 +88,9 @@ export default function (pi: ExtensionAPI) {
   /** Pulse animation state for the session we just switched to. */
   let pulseTimer: ReturnType<typeof setInterval> | null = null;
   let pulseStartedAt = 0;
+  /** Set by agent_start; see isSessionBusy for how it is used. */
+  let agentBusy = false;
+  let agentBusyAt = 0;
 
   // --- Derived state ---------------------------------------------------------
   function buildState(): SidebarRenderState {
@@ -339,6 +349,37 @@ export default function (pi: ExtensionAPI) {
    * command context. Note that pi's editor treats a "\r" inside a longer text
    * chunk as a literal newline, so the text and the Enter must be separate.
    */
+  /**
+   * True while the current session is still working.
+   *
+   * `ctx.isIdle()` is authoritative: pi knows whether a run is in flight, and
+   * unlike an event flag it cannot go stale. The `agent_start` flag only covers
+   * the moment before pi's idle state catches up, and it expires after
+   * BUSY_GRACE_MS — so a missed `agent_settled` can never lock switching out
+   * permanently.
+   */
+  function isSessionBusy(): boolean {
+    let idle: boolean | null = null;
+    try {
+      idle = currentCtx ? currentCtx.isIdle() : null;
+    } catch {
+      idle = null;
+    }
+    if (idle === false) return true;
+    return agentBusy && Date.now() - agentBusyAt < BUSY_GRACE_MS;
+  }
+
+  /**
+   * Refuse one of the sidebar's own session switches while work is in flight.
+   * pi's own commands are deliberately left alone: only this plugin's actions
+   * are guarded.
+   */
+  function blockedByRunningSession(action: string): boolean {
+    if (!config.guardBusySession || !isSessionBusy()) return false;
+    currentCtx?.ui.notify(`当前会话正在运行，不能${action}`, "warning");
+    return true;
+  }
+
   function submitCommand(
     sub: string,
     mode: "unfocus" | "refocus" | "stay",
@@ -581,6 +622,7 @@ export default function (pi: ExtensionAPI) {
           if (!action.keepFocus) exitFocus();
           return { consume: true };
         }
+        if (blockedByRunningSession("切换")) return { consume: true };
         const injected = submitCommand(
           `switch ${target.session.id}`,
           action.keepFocus ? "refocus" : "unfocus",
@@ -604,6 +646,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       case "new":
+        if (blockedByRunningSession("新建会话")) return { consume: true };
         return submitCommand("new", "unfocus");
 
       case "rename": {
@@ -677,6 +720,7 @@ export default function (pi: ExtensionAPI) {
     focused = false;
     searchQuery = null;
     pendingSwitch = null;
+    agentBusy = false;
     sessionRoots = sessionRootsFor(ctx);
 
     if (!ctx.hasUI) return;
@@ -743,7 +787,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Repaint when the agent settles so the current session's timestamp stays fresh.
+  pi.on("agent_start", () => {
+    agentBusy = true;
+    agentBusyAt = Date.now();
+  });
+
   pi.on("agent_settled", () => {
+    agentBusy = false;
     refreshSessions(false);
   });
 
@@ -802,6 +852,11 @@ export default function (pi: ExtensionAPI) {
         // --- Internal subcommands (used by focused-sidebar key handling) --------
         case "switch": {
           const id = rest[0];
+          if (config.guardBusySession && isSessionBusy()) {
+            setPendingRefocus(false);
+            ctx.ui.notify("当前会话正在运行，不能切换", "warning");
+            break;
+          }
           const session = allSessions.find((s) => s.id === id);
           if (!session) {
             // Do not leave a "refocus" marker behind for a switch that never ran.
@@ -821,6 +876,11 @@ export default function (pi: ExtensionAPI) {
           break;
         }
         case "new":
+          if (config.guardBusySession && isSessionBusy()) {
+            setPendingRefocus(false);
+            ctx.ui.notify("当前会话正在运行，不能新建会话", "warning");
+            break;
+          }
           await ctx.newSession();
           break;
         case "rename": {
