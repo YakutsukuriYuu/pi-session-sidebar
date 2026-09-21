@@ -7,8 +7,10 @@ export const ANSI = {
   reset: esc("0"),
   bold: esc("1"),
   dim: esc("2"),
+  underline: esc("4"),
   inverse: esc("7"),
   fgGray: esc("90"),
+  fgBlue: esc("94"),
   fgCyan: esc("96"),
 };
 
@@ -24,20 +26,38 @@ export function accent(text: string): string {
   return `${ANSI.fgCyan}${text}${ANSI.reset}`;
 }
 
-/** Highlight (selected row): inverted colors. */
+/** Highlight (selected row): inverted colors. Only sessions ever use this. */
 export function selected(text: string): string {
   return `${ANSI.inverse}${text}${ANSI.reset}`;
 }
 
-/** Columns in front of a row's body: a padding space, the marker and a space. */
-const ROW_PREFIX = 3;
+/**
+ * Folder rows carry their own colour (blue) so a project heading can never be
+ * mistaken for a session title.
+ */
+export function folder(text: string): string {
+  return `${ANSI.fgBlue}${ANSI.bold}${text}${ANSI.reset}`;
+}
+
+/** Selected folder: underlined rather than inverted (see rowLine). */
+export function folderUnderlined(text: string): string {
+  return `${ANSI.fgBlue}${ANSI.bold}${ANSI.underline}${text}${ANSI.reset}`;
+}
+
+/** Selected folder icon: a solid blue chip that acts as the cursor. */
+export function folderChip(text: string): string {
+  return `${ANSI.fgBlue}${ANSI.inverse}${text}${ANSI.reset}`;
+}
+
+/** Columns before a session title: two-space indent, marker, space. */
+const SESSION_PREFIX = 4;
 
 /**
  * Titles are never squeezed below this many columns. Together with the minimum
- * usable time budget (below) this puts the time column's threshold at a
- * 30-column sidebar, and wider dates degrade instead of eating into the title.
+ * usable time budget (below) this keeps the time column's threshold at a
+ * 30-column sidebar; wider dates degrade instead of eating into the title.
  */
-const MIN_TITLE_COLS = 20;
+const MIN_TITLE_COLS = 19;
 
 /** Narrowest time column worth showing: "14:23". */
 const MIN_TIME_BUDGET = 5;
@@ -120,19 +140,27 @@ function joinSides(left: string, right: string, width: number): string {
   return pad(clip(left, leftWidth), leftWidth) + right;
 }
 
-/** One list row: ` marker body ………right`, inverted when it is the selection. */
+/**
+ * One list row: `prefix body ………right`.
+ *
+ * `invert` is what keeps the two row kinds apart: a selected session is
+ * inverted, so "inverted = Enter switches to it" stays a reliable rule, while a
+ * folder row carries its own blue highlight and is never inverted.
+ */
 function rowLine(
-  marker: string,
+  prefix: string,
   body: string,
   right: string,
   isSelected: boolean,
+  invert: boolean,
   width: number,
 ): string {
+  const prefixWidth = visibleWidth(prefix);
   const rightWidth = right ? visibleWidth(right) : 0;
   const gap = right ? 1 : 0;
-  const bodyWidth = Math.max(1, width - ROW_PREFIX - rightWidth - gap);
-  const content = ` ${marker} ${pad(clip(body, bodyWidth), bodyWidth)}${right ? " " + right : ""}`;
-  return isSelected ? selected(pad(content, width)) : content;
+  const bodyWidth = Math.max(1, width - prefixWidth - rightWidth - gap);
+  const content = prefix + pad(clip(body, bodyWidth), bodyWidth) + (right ? " " + right : "");
+  return isSelected && invert ? selected(pad(content, width)) : content;
 }
 
 /**
@@ -191,7 +219,7 @@ export function renderSidebar(
 
   // The time column is one decision per render: it gets whatever is left after
   // the title budget, capped to a sane width.
-  const timeBudget = Math.min(MAX_TIME_BUDGET, inner - ROW_PREFIX - 1 - MIN_TITLE_COLS);
+  const timeBudget = Math.min(MAX_TIME_BUDGET, inner - SESSION_PREFIX - 1 - MIN_TITLE_COLS);
   const showTime = timeBudget >= MIN_TIME_BUDGET;
   const showGuide = width >= GUIDE_MIN_WIDTH;
   const now = new Date();
@@ -207,14 +235,15 @@ export function renderSidebar(
     if (isSelected) selectedLineIndex = lines.length;
 
     if (row.kind === "group") {
-      // A left bar marks the project pi is currently running in; the collapse
-      // affordance and the session count sit right-aligned.
+      // Folder rows: icon in column 1, blue label, count right-aligned. The bar
+      // marks the project pi is currently running in.
       const isCurrentProject = group.cwd === state.currentCwd;
-      const marker = isCurrentProject ? accent("▌") : " ";
-      const icon = group.collapsed ? "▸" : "▾";
-      const right = dim(`${icon}${group.sessions.length}`);
-      const body = isCurrentProject ? accent(bold(group.label)) : bold(group.label);
-      lines.push(rowLine(marker, body, right, isSelected && state.focused, inner));
+      const isCursor = isSelected && state.focused;
+      const symbol = group.collapsed ? "▢" : "▣";
+      const bar = isCurrentProject ? folder("▌") : " ";
+      const icon = isCursor ? folderChip(symbol) : folder(symbol);
+      const label = isCursor ? folderUnderlined(group.label) : folder(group.label);
+      lines.push(rowLine(`${bar}${icon} `, label, dim(`${group.sessions.length}`), false, false, inner));
     } else {
       const session = group.sessions[row.sessionIndex ?? 0];
       if (!session) continue;
@@ -226,7 +255,7 @@ export function renderSidebar(
       else if (showGuide) marker = dim("│");
       const right = showTime ? dim(formatTimeFor(session.modified, now, timeBudget)) : "";
       const body = isCurrent ? accent(session.title) : session.title;
-      lines.push(rowLine(marker, body, right, isSelected && state.focused, inner));
+      lines.push(rowLine(`  ${marker} `, body, right, isSelected && state.focused, true, inner));
     }
   }
 

@@ -190,6 +190,50 @@ const foot = overflow[overflow.length - 1];
 assert.ok(foot.includes("↑"), "footer hints at rows above the window");
 assert.ok(foot.includes("↓"), "footer hints at rows below the window");
 
+// --- folder rows must not read as session rows -------------------------------
+const rawLines = (width: number, extra: Record<string, unknown> = {}) =>
+  renderSidebar({ ...uiState, width, ...extra }, width, 12).lines;
+const rawWide = rawLines(30);
+const plainWide = rawWide.map(plainLine);
+const folderOf = (lines: string[]) => lines.find((l) => l.includes("▣") || l.includes("▢")) ?? "";
+const sessionOf = (lines: string[], title: string) =>
+  lines.find((line) => plainLine(line).includes(title)) ?? "";
+
+// A folder gets its own colour and a container icon; sessions never do.
+assert.ok(folderOf(rawWide).includes("▣"), "expanded folder uses the filled icon");
+assert.ok(folderOf(rawWide).includes("\x1b[94m"), "folder row is drawn in the folder colour");
+
+// Icons follow the collapse state.
+const collapsedGroups = groupSessions(uiSessions, "/proj/p", new Set(["/proj/p"]), true);
+const collapsedRaw = rawLines(30, {
+  groups: collapsedGroups,
+  flatRows: flattenRows(collapsedGroups),
+});
+assert.ok(collapsedRaw.some((l) => l.includes("▢")), "collapsed folder uses the hollow icon");
+assert.ok(!collapsedRaw.some((l) => l.includes("▣")), "filled icon only while expanded");
+
+// Sessions sit indented under their folder; the current one stays cyan.
+assert.ok(
+  plainWide.some((l) => l.startsWith("  ") && l.includes("今天的会话")),
+  "session rows are indented under their folder",
+);
+assert.ok(sessionOf(rawWide, "今天的会话").includes("\x1b[96m"), "current session stays cyan");
+assert.equal(
+  sessionOf(rawWide, "今年的会话").includes("\x1b[94m"),
+  false,
+  "ordinary sessions are not drawn in the folder colour",
+);
+
+// Selection rules: only sessions invert, so "inverted = Enter switches here"
+// stays true and a folder heading can never be mistaken for a session.
+const folderSelected = folderOf(rawLines(30, { selectedIndex: 0 }));
+assert.ok(!folderSelected.startsWith("\x1b[7m"), "selected folder row is not fully inverted");
+assert.ok(folderSelected.includes("\x1b[4m"), "selected folder label is underlined instead");
+assert.ok(
+  sessionOf(rawLines(30, { selectedIndex: 1 }), "今天的会话").startsWith("\x1b[7m"),
+  "selected session row is inverted",
+);
+
 // --- shiftRight transform (re-implemented here to test the regex logic) ----
 // We exercise the real compositor transform via a minimal fake terminal.
 const { SessionSidebarCompositor } = await import("../src/compositor.ts");
