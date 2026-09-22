@@ -15,8 +15,20 @@ import { join } from "node:path";
  * session switch reads nothing at all unless a session changed.
  */
 
-/** Bytes read from the start of a file (header + first user message). */
-const HEAD_BYTES = 16 * 1024;
+/**
+ * Bytes read from the start of a file before an already-found title is enough.
+ *
+ * pi writes a `system` message holding the whole system prompt as the first
+ * message entry, and that entry is easily 60 KB — a fixed 16 KB window used to
+ * miss the first user message of such a session and label it "(空会话)". The
+ * head scan therefore continues until it has a title, and this window only
+ * bounds how far it looks for a creation-time name.
+ */
+const HEAD_WINDOW_BYTES = 64 * 1024;
+/** How far the head scan may run when no user message has been found yet. */
+const MAX_TITLE_SCAN_BYTES = 4 * 1024 * 1024;
+/** Chunk size of the progressive head scan. */
+const SCAN_CHUNK_BYTES = 64 * 1024;
 /** Bytes read from the end of a file (the latest name entry). */
 const TAIL_BYTES = 4 * 1024;
 /** How deep below a session root a session file may sit. */
@@ -63,16 +75,25 @@ function readSlice(path: string, position: number, length: number): string {
   }
 }
 
-function parseJsonLines(text: string): unknown[] {
-  const out: unknown[] = [];
+/**
+ * One JSON line as a record, or null when the line is blank, truncated, junk or
+ * not an object. The shape is settled here so no caller has to re-check it.
+ */
+function parseLine(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  try {
+    return asRecord(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonLines(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
   for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      out.push(JSON.parse(trimmed));
-    } catch {
-      // A slice can end mid-line, and old files can hold junk: skip it.
-    }
+    const parsed = parseLine(line);
+    if (parsed !== null) out.push(parsed);
   }
   return out;
 }
@@ -86,7 +107,7 @@ function readHeader(path: string): { id?: string; cwd?: string } {
   const head = readSlice(path, 0, 2048);
   const firstLine = head.split("\n")[0];
   if (!firstLine) return {};
-  const record = asRecord(parseJsonLines(firstLine)[0]);
+  const record = parseJsonLines(firstLine)[0];
   if (!record) return {};
   return {
     id: typeof record.id === "string" ? record.id : undefined,
@@ -102,10 +123,14 @@ function userMessageText(entry: Record<string, unknown>): string | null {
   const content = message.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
+    let image = false;
     for (const part of content) {
       const record = asRecord(part);
       if (record?.type === "text" && typeof record.text === "string") return record.text;
+      if (record?.type === "image") image = true;
     }
+    // A pasted image with no caption is still a user turn, not an empty session.
+    if (image) return "[图片]";
   }
   return null;
 }
@@ -134,34 +159,77 @@ function titleFor(path: string, size: number, mtimeMs: number): TitleInfo {
     return { name: cached.name, firstMessage: cached.firstMessage };
   }
 
-  const headEntries = parseJsonLines(readSlice(path, 0, Math.min(HEAD_BYTES, size)));
-  let firstMessage = "";
-  let name: string | undefined;
-  for (const raw of headEntries) {
-    const entry = asRecord(raw);
-    if (!entry) continue;
-    if (!firstMessage) {
-      const text = userMessageText(entry);
-      if (text) firstMessage = summarize(text);
-    }
-    const headName = sessionInfoName(entry);
-    if (headName) name = headName;
-  }
+  const head = scanHead(path, size);
 
   // The newest entry wins, and renames append at the end.
   const tailStart = Math.max(0, size - TAIL_BYTES);
   const tailEntries = parseJsonLines(readSlice(path, tailStart, Math.min(TAIL_BYTES, size)));
-  for (const raw of tailEntries) {
-    const entry = asRecord(raw);
-    if (!entry) continue;
+  for (const entry of tailEntries) {
     if (entry.type === "session_info") {
-      name = typeof entry.name === "string" && entry.name ? entry.name : undefined;
+      head.name = typeof entry.name === "string" && entry.name ? entry.name : undefined;
     }
   }
 
-  const info: TitleInfo = { name, firstMessage };
+  const info: TitleInfo = { name: head.name, firstMessage: head.firstMessage };
   titleCache.set(path, { size, mtimeMs, ...info });
   return info;
+}
+
+/**
+ * Hunt the first user message by reading forward in chunks.
+ *
+ * Reading stops as soon as a title exists and the name window is covered, so a
+ * session whose first user message sits behind a 60 KB system message still
+ * costs little — the rest of the file (often megabytes) is never touched.
+ */
+function scanHead(path: string, size: number): TitleInfo {
+  let firstMessage = "";
+  let name: string | undefined;
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const buffer = Buffer.allocUnsafe(SCAN_CHUNK_BYTES);
+    let position = 0;
+    let carry = "";
+
+    const consume = (text: string): void => {
+      for (const line of text.split("\n")) {
+        const entry = parseLine(line);
+        if (!entry) continue;
+        if (!firstMessage) {
+          const message = userMessageText(entry);
+          if (message) firstMessage = summarize(message);
+        }
+        const headName = sessionInfoName(entry);
+        if (headName) name = headName;
+      }
+    };
+
+    while (position < size) {
+      const read = readSync(fd, buffer, 0, Math.min(SCAN_CHUNK_BYTES, size - position), position);
+      if (read <= 0) break;
+      position += read;
+      const lines = (carry + buffer.subarray(0, read).toString("utf8")).split("\n");
+      // The last element is a partial line the next chunk completes.
+      carry = lines.pop() ?? "";
+      consume(lines.join("\n"));
+      if (firstMessage ? position >= HEAD_WINDOW_BYTES : position >= MAX_TITLE_SCAN_BYTES) break;
+    }
+    // A file can end without a trailing newline; then the carry is a real entry.
+    if (carry) consume(carry);
+  } catch {
+    // An unreadable file simply has no title yet.
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Nothing useful to do if closing fails.
+      }
+    }
+  }
+
+  return { name, firstMessage };
 }
 
 /** Drop cache entries whose file disappeared, so the map cannot grow forever. */

@@ -736,6 +736,64 @@ assert.ok(
 );
 rmSync(tempRoot, { recursive: true, force: true });
 
+// pi writes the whole system prompt as the first message entry, and that entry is
+// easily tens of kilobytes, so the first user message can sit far past any fixed
+// head window. A title must still be found — otherwise a real session is shown as
+// "(空会话)".
+const deepTitleRoot = mkdtempSync(join(tmpdir(), "sidebar-deep-title-"));
+const deepTitleDir = join(deepTitleRoot, "--tmp-deep--");
+mkdirSync(deepTitleDir, { recursive: true });
+const bigSystemMessage = {
+  type: "message",
+  id: "s1",
+  parentId: null,
+  timestamp: "2026-01-01T00:00:00.000Z",
+  message: { role: "system", content: "系".repeat(30000) },
+};
+const lateUserMessage = {
+  ...userMessage,
+  id: "m2",
+  timestamp: "2026-01-01T00:00:02.000Z",
+  message: { role: "user", content: "系统提示词之后的首条消息" },
+};
+const lateTitleFile = join(deepTitleDir, "late.jsonl");
+writeFileSync(lateTitleFile, [JSON.stringify(header), JSON.stringify(bigSystemMessage), JSON.stringify(lateUserMessage)].join("\n") + "\n");
+const lateListed = listSessions([deepTitleRoot]);
+assert.equal(
+  lateListed[0].firstMessage,
+  "系统提示词之后的首条消息",
+  "a first user message behind a huge system message is still found",
+);
+// The system message itself must never be mistaken for a title.
+assert.notEqual(lateListed[0].firstMessage, "系", "a system message is not a title");
+
+// A first turn that is only a pasted image is a real turn, not an empty session.
+const imageFile = join(deepTitleDir, "image.jsonl");
+writeFileSync(
+  imageFile,
+  [
+    JSON.stringify({ ...header, id: "img" }),
+    JSON.stringify({
+      type: "message",
+      id: "i1",
+      parentId: null,
+      timestamp: "2026-01-01T00:00:03.000Z",
+      message: { role: "user", content: [{ type: "image", source: { type: "base64", data: "..." } }] },
+    }),
+  ].join("\n") + "\n",
+);
+const imageListed = listSessions([deepTitleRoot]).find((s) => s.id === "img");
+assert.equal(imageListed?.firstMessage, "[图片]", "an image-only first turn is not empty");
+
+// A session with no user message at all is genuinely empty; the caller turns the
+// empty title into its "(空会话)" label.
+const blankFile = join(deepTitleDir, "blank.jsonl");
+writeFileSync(blankFile, JSON.stringify({ ...header, id: "blank" }) + "\n");
+const blankListed = listSessions([deepTitleRoot]).find((s) => s.id === "blank");
+assert.equal(blankListed?.firstMessage, "", "a header-only session has no title");
+assert.equal(blankListed?.name, undefined, "a header-only session has no name");
+rmSync(deepTitleRoot, { recursive: true, force: true });
+
 // --- landing pulse -----------------------------------------------------------
 assert.equal(pulseMarkerFor(0), PULSE_FRAMES[0], "pulse starts on the first frame");
 assert.equal(pulseMarkerFor(PULSE_FRAMES.length * 70), PULSE_FRAMES[0], "the pulse loops");
